@@ -129,15 +129,6 @@ fi
 
 timestamp() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
-header() {
-  echo
-  echo "====================================================================="
-  echo "Batch Telemetry | $1 | pg=${PGVER} | batch_id=${BATCH_ID}"
-  [[ -n "${TARGET_TABLE}" ]] && echo "Target table: ${TARGET_TABLE}"
-  echo "Timestamp: $(timestamp)"
-  echo "====================================================================="
-}
-
 psql_json() { psql -X -q -t -A "$@"; }
 psql_tbl()  { psql -X "$@"; }
 
@@ -424,8 +415,6 @@ SQL
 
 case "${CMD}" in
   start)
-    header "START"
-
     # Common captures for all versions
     SETTINGS="$(capture_settings)"
     WAL="$(capture_wal)"
@@ -479,7 +468,7 @@ case "${CMD}" in
           wal_start: $wal,
           slots_start: $slots,
           table_start: $table_start
-        }' | tee "$STATE_FILE"
+        }' > "$STATE_FILE"
 
     elif [[ "${PGVER}" == "16" ]]; then
       # PG16: bgwriter has checkpoint stats, pg_stat_io available
@@ -516,7 +505,7 @@ case "${CMD}" in
           wal_start: $wal,
           slots_start: $slots,
           table_start: $table_start
-        }' | tee "$STATE_FILE"
+        }' > "$STATE_FILE"
 
     else
       # PG17: checkpointer split out, pg_stat_io available
@@ -557,43 +546,24 @@ case "${CMD}" in
           wal_start: $wal,
           slots_start: $slots,
           table_start: $table_start
-        }' | tee "$STATE_FILE"
+        }' > "$STATE_FILE"
     fi
-
-    echo
-    echo "State saved to: $STATE_FILE"
     ;;
 
   sample)
-    header "SAMPLE"
-
-    echo
-    echo "-- Wait event summary --"
-    sample_waits
-
-    echo
-    echo "-- Top active sessions --"
-    sample_activity
-
-    echo
-    echo "-- Autovacuum progress --"
-    sample_vacuum
-
-    echo
-    echo "-- COPY progress --"
-    sample_copy
-
-    # pg_stat_io only available on PG16+
-    if [[ "${PGVER}" != "15" ]]; then
-      echo
-      echo "-- I/O by backend type (pg_stat_io) --"
-      sample_io
-    fi
+    # Capture point-in-time snapshots (silent - data goes to state file)
+    {
+      echo "=== SAMPLE $(timestamp) ==="
+      sample_waits
+      sample_activity
+      sample_vacuum
+      sample_copy
+      [[ "${PGVER}" != "15" ]] && sample_io
+    } >> "${STATE_DIR}/${BATCH_ID}.samples"
     ;;
 
   end)
     [[ -f "$STATE_FILE" ]] || { echo "ERROR: no state file found: $STATE_FILE (did you run start?)" >&2; exit 1; }
-    header "END"
 
     # Common captures for all versions
     WAL_END="$(capture_wal)"
@@ -633,7 +603,7 @@ case "${CMD}" in
           wal_end: $wal_end,
           slots_end: $slots_end,
           table_end: $table_end
-        }' "$STATE_FILE" | tee "$TMP" && mv "$TMP" "$STATE_FILE"
+        }' "$STATE_FILE" > "$TMP" && mv "$TMP" "$STATE_FILE"
 
     elif [[ "${PGVER}" == "16" ]]; then
       # PG16: bgwriter has checkpoint stats, pg_stat_io available
@@ -658,7 +628,7 @@ case "${CMD}" in
           wal_end: $wal_end,
           slots_end: $slots_end,
           table_end: $table_end
-        }' "$STATE_FILE" | tee "$TMP" && mv "$TMP" "$STATE_FILE"
+        }' "$STATE_FILE" > "$TMP" && mv "$TMP" "$STATE_FILE"
 
     else
       # PG17: checkpointer split out, pg_stat_io available
@@ -687,13 +657,12 @@ case "${CMD}" in
           wal_end: $wal_end,
           slots_end: $slots_end,
           table_end: $table_end
-        }' "$STATE_FILE" | tee "$TMP" && mv "$TMP" "$STATE_FILE"
+        }' "$STATE_FILE" > "$TMP" && mv "$TMP" "$STATE_FILE"
     fi
     ;;
 
   report)
     [[ -f "$STATE_FILE" ]] || { echo "ERROR: no state file found: $STATE_FILE" >&2; exit 1; }
-    header "REPORT (DELTAS)"
 
     if [[ "${PGVER}" == "15" ]]; then
       # PG15 report
