@@ -558,7 +558,7 @@ case "${CMD}" in
       sample_activity
       sample_vacuum
       sample_copy
-      [[ "${PGVER}" != "15" ]] && sample_io
+      if [[ "${PGVER}" != "15" ]]; then sample_io; fi
     } >> "${STATE_DIR}/${BATCH_ID}.samples"
     ;;
 
