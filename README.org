@@ -28,7 +28,7 @@ This comprises a loose assortment of tools, scripts, programs, etc., that are us
 
 * Tools
 
-** batch_telemetry_15.sh
+** batch_telemetry.sh
 
 Client-side batch telemetry for PostgreSQL 15, 16, or 17. Captures before/after snapshots of database statistics to diagnose checkpoint pressure, WAL volume, autovacuum interference, and I/O bottlenecks during batch workloads—without writing anything to the database.
 
@@ -45,10 +45,10 @@ Uses standard libpq environment variables (~PGHOST~, ~PGPORT~, ~PGUSER~, ~PGDATA
 *** Basic Usage
 
 #+begin_src bash
-./batch_telemetry_15.sh start  batch_1 "10M row import"
-./batch_telemetry_15.sh sample batch_1
-./batch_telemetry_15.sh end    batch_1
-./batch_telemetry_15.sh report batch_1
+./batch_telemetry.sh start  batch_1 "10M row import"
+./batch_telemetry.sh sample batch_1
+./batch_telemetry.sh end    batch_1
+./batch_telemetry.sh report batch_1
 #+end_src
 
 *** Commands
@@ -83,14 +83,14 @@ BATCH_ID="batch_$(date +%Y%m%d_%H%M%S)"
 TABLE_NAME="target_table"
 
 # Start telemetry
-./batch_telemetry_15.sh --table "$TABLE_NAME" start "$BATCH_ID" "10M row insert"
+./batch_telemetry.sh --table "$TABLE_NAME" start "$BATCH_ID" "10M row insert"
 
 # Run the batch insert job
 # <your insert command here>
 
 # End telemetry and generate report
-./batch_telemetry_15.sh end "$BATCH_ID"
-./batch_telemetry_15.sh report "$BATCH_ID" > "${BATCH_ID}_report.txt"
+./batch_telemetry.sh end "$BATCH_ID"
+./batch_telemetry.sh report "$BATCH_ID" > "${BATCH_ID}_report.txt"
 #+end_src
 
 **** Sampling During Long-Running Jobs
@@ -100,7 +100,7 @@ For jobs that may run 10+ minutes, capture periodic samples to see what's happen
 #+begin_src bash
 # In a separate terminal, sample every 60 seconds while the job runs
 while true; do
-  ./batch_telemetry_15.sh sample "$BATCH_ID"
+  ./batch_telemetry.sh sample "$BATCH_ID"
   sleep 60
 done
 #+end_src
