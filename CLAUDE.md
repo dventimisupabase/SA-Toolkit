@@ -6,6 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a Solutions Architect Toolkit - a collection of tools, scripts, and programs useful for Solutions Architects supporting PostgreSQL database products.
 
+## Design Principles
+
+- **Read-only database access**: Tools should collect diagnostics without writing to customer databases
+- **Standard libpq authentication**: Use `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `PGPASSWORD` environment variables or `.pgpass`
+- **Auto-detection over manual config**: Prefer querying the database for configuration (e.g., PG version) rather than requiring user input
+- **Local state storage**: Store telemetry/state files locally in `.telemetry/` directory, not in the database
+
 ## Tools
 
 ### batch_telemetry_15.sh
@@ -42,3 +49,18 @@ PostgreSQL version is auto-detected from the connected database.
 - PG 15: Uses `pg_stat_bgwriter` for all checkpoint stats, no `pg_stat_io`
 - PG 16: Uses `pg_stat_bgwriter` for checkpoint stats, `pg_stat_io` available
 - PG 17: Checkpoint stats split into `pg_stat_checkpointer`, `pg_stat_io` available
+
+**Testing:**
+```bash
+# Verify syntax
+bash -n batch_telemetry_15.sh
+
+# Test against a database (requires PG* env vars or .pgpass)
+./batch_telemetry_15.sh start test_batch "test run"
+./batch_telemetry_15.sh sample test_batch
+./batch_telemetry_15.sh end test_batch
+./batch_telemetry_15.sh report test_batch
+
+# Clean up
+rm .telemetry/test_batch.json
+```
