@@ -15,7 +15,7 @@ This is a Solutions Architect Toolkit - a collection of tools, scripts, and prog
 
 ## Tools
 
-### batch_telemetry_15.sh
+### batch_telemetry.sh
 
 A client-side batch telemetry script for PostgreSQL 15, 16, or 17 that collects database performance metrics without writing to the database. Uses standard libpq environment variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `PGPASSWORD`) or `.pgpass` for authentication.
 
@@ -23,13 +23,13 @@ A client-side batch telemetry script for PostgreSQL 15, 16, or 17 that collects 
 
 **Usage:**
 ```bash
-./batch_telemetry_15.sh start  batch_1 "10M row import" | tee batch_1.log
-./batch_telemetry_15.sh sample batch_1                 | tee -a batch_1.log
-./batch_telemetry_15.sh end    batch_1                 | tee -a batch_1.log
-./batch_telemetry_15.sh report batch_1
+./batch_telemetry.sh start  batch_1 "10M row import" | tee batch_1.log
+./batch_telemetry.sh sample batch_1                 | tee -a batch_1.log
+./batch_telemetry.sh end    batch_1                 | tee -a batch_1.log
+./batch_telemetry.sh report batch_1
 
 # With table tracking:
-./batch_telemetry_15.sh --table orders start batch_1 "import"
+./batch_telemetry.sh --table orders start batch_1 "import"
 ```
 
 PostgreSQL version is auto-detected from the connected database.
@@ -53,13 +53,13 @@ PostgreSQL version is auto-detected from the connected database.
 **Testing:**
 ```bash
 # Verify syntax
-bash -n batch_telemetry_15.sh
+bash -n batch_telemetry.sh
 
 # Test against a database (requires PG* env vars or .pgpass)
-./batch_telemetry_15.sh start test_batch "test run"
-./batch_telemetry_15.sh sample test_batch
-./batch_telemetry_15.sh end test_batch
-./batch_telemetry_15.sh report test_batch
+./batch_telemetry.sh start test_batch "test run"
+./batch_telemetry.sh sample test_batch
+./batch_telemetry.sh end test_batch
+./batch_telemetry.sh report test_batch
 
 # Clean up
 rm .telemetry/test_batch.json
