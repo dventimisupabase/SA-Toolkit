@@ -227,9 +227,8 @@ FROM (
   SELECT
     num_timed,
     num_requested,
-    num_done,
     restartpoints_timed,
-    restartpoints_requested,
+    restartpoints_req,
     restartpoints_done,
     write_time,
     sync_time,
@@ -854,7 +853,6 @@ case "${CMD}" in
           "=== CHECKPOINTER STATS ===": null,
           checkpointer_num_timed_delta:       (.ckp_end.num_timed - .ckp_start.num_timed),
           checkpointer_num_requested_delta:   (.ckp_end.num_requested - .ckp_start.num_requested),
-          checkpointer_num_done_delta:        (.ckp_end.num_done - .ckp_start.num_done),
           checkpointer_write_time_ms_delta:   (.ckp_end.write_time - .ckp_start.write_time),
           checkpointer_sync_time_ms_delta:    (.ckp_end.sync_time - .ckp_start.sync_time),
           checkpointer_buffers_written_delta: (.ckp_end.buffers_written - .ckp_start.buffers_written),
