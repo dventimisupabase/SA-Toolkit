@@ -1,0 +1,27 @@
+
+#+options: ':nil *:t -:t ::t <:t H:3 \n:nil ^:t arch:headline
+#+options: author:t broken-links:nil c:nil creator:nil
+#+options: d:(not "LOGBOOK") date:t e:t email:nil expand-links:t f:t
+#+options: inline:t num:t p:nil pri:nil prop:nil stat:t tags:t
+#+options: tasks:t tex:t timestamp:t title:t toc:t todo:t |:t
+#+title: README
+#+date: <2025-12-15 Mon>
+#+author: David A. Ventimiglia
+#+email: david.ventimiglia@supabase.io
+#+language: en
+#+select_tags: export
+#+exclude_tags: noexport
+#+creator: Emacs 30.1 (Org mode 9.7.11)
+#+cite_export:
+
+#+STARTUP: indent
+
+* What
+
+This is a Solutions Architect Toolkit.
+
+* Why
+
+* How
+
+This comprises a loose assortment of tools, scripts, programs, etc., that are useful to a Solutions Architect, especially one supporting PostgreSQL database products.
