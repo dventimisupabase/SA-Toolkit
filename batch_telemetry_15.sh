@@ -11,20 +11,19 @@ set -euo pipefail
 # Requirements: bash, psql, jq
 #
 # Usage:
-#   ./batch_telemetry.sh --pg 15 start  batch_1 "10M row import" | tee batch_1.log
-#   ./batch_telemetry.sh --pg 15 sample batch_1                 | tee -a batch_1.log
-#   ./batch_telemetry.sh --pg 15 end    batch_1                 | tee -a batch_1.log
-#   ./batch_telemetry.sh --pg 15 report batch_1
+#   ./batch_telemetry.sh start  batch_1 "10M row import" | tee batch_1.log
+#   ./batch_telemetry.sh sample batch_1                 | tee -a batch_1.log
+#   ./batch_telemetry.sh end    batch_1                 | tee -a batch_1.log
+#   ./batch_telemetry.sh report batch_1
 #
-#   ./batch_telemetry.sh --pg 17 --table my_table start batch_1 "10M row import"
-#   ... etc ...
+#   ./batch_telemetry.sh --table my_table start batch_1 "10M row import"
 #
 # Options:
-#   --pg {15|16|17}    PostgreSQL major version (required)
 #   --table <name>     Track table-specific stats (optional)
 #
 # State written locally to: .telemetry/<batch_id>.json
 #
+# PostgreSQL version is auto-detected from the connected database.
 # PG version differences:
 #   PG 15: checkpoint stats in pg_stat_bgwriter, no pg_stat_io
 #   PG 16: checkpoint stats in pg_stat_bgwriter, pg_stat_io available
@@ -34,25 +33,25 @@ set -euo pipefail
 # -----------------------------
 # Arg parsing
 # -----------------------------
-PGVER=""
 TARGET_TABLE=""
 
 usage() {
   cat <<'USAGE'
 Usage:
-  batch_telemetry.sh --pg {15|16|17} [--table <name>] <start|sample|end|report> <batch_id> [note]
+  batch_telemetry.sh [--table <name>] <start|sample|end|report> <batch_id> [note]
 
 Options:
-  --pg {15|16|17}    PostgreSQL major version (required)
   --table <name>     Track table-specific stats (optional)
 
-Examples:
-  ./batch_telemetry.sh --pg 15 start  batch_1 "10M row import" | tee batch_1.log
-  ./batch_telemetry.sh --pg 15 sample batch_1                 | tee -a batch_1.log
-  ./batch_telemetry.sh --pg 15 end    batch_1                 | tee -a batch_1.log
-  ./batch_telemetry.sh --pg 15 report batch_1
+PostgreSQL version is auto-detected from the connected database.
 
-  ./batch_telemetry.sh --pg 17 --table orders start batch_7 "checkpoint test" | tee batch_7.log
+Examples:
+  ./batch_telemetry.sh start  batch_1 "10M row import" | tee batch_1.log
+  ./batch_telemetry.sh sample batch_1                 | tee -a batch_1.log
+  ./batch_telemetry.sh end    batch_1                 | tee -a batch_1.log
+  ./batch_telemetry.sh report batch_1
+
+  ./batch_telemetry.sh --table orders start batch_7 "checkpoint test" | tee batch_7.log
 USAGE
 }
 
@@ -61,17 +60,9 @@ if [[ $# -lt 2 ]]; then
   exit 1
 fi
 
-# Accept: --pg 15 or --pg=15, --table foo or --table=foo
+# Accept: --table foo or --table=foo
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --pg)
-      PGVER="${2:-}"
-      shift 2
-      ;;
-    --pg=*)
-      PGVER="${1#*=}"
-      shift
-      ;;
     --table)
       TARGET_TABLE="${2:-}"
       shift 2
@@ -94,15 +85,6 @@ CMD="${1:-}"
 BATCH_ID="${2:-}"
 NOTE="${3:-}"
 
-if [[ -z "${PGVER}" ]]; then
-  echo "ERROR: --pg {15|16|17} is required" >&2
-  usage
-  exit 1
-fi
-if [[ "${PGVER}" != "15" && "${PGVER}" != "16" && "${PGVER}" != "17" ]]; then
-  echo "ERROR: --pg must be 15, 16, or 17 (got: ${PGVER})" >&2
-  exit 1
-fi
 if [[ -z "${CMD}" || -z "${BATCH_ID}" ]]; then
   echo "ERROR: command and batch_id are required" >&2
   usage
@@ -121,6 +103,29 @@ require() {
 }
 require psql
 require jq
+
+# Auto-detect PostgreSQL major version
+detect_pg_version() {
+  local ver
+  ver=$(psql -X -q -t -A -c "SHOW server_version_num" 2>/dev/null) || {
+    echo "ERROR: Could not connect to database to detect PostgreSQL version" >&2
+    echo "Ensure PGHOST, PGUSER, PGDATABASE etc. are set or .pgpass is configured" >&2
+    exit 1
+  }
+  if [[ -z "$ver" ]]; then
+    echo "ERROR: Could not determine PostgreSQL version" >&2
+    exit 1
+  fi
+  # server_version_num is like 170004 (PG17), 160000 (PG16), 150005 (PG15)
+  echo $(( ver / 10000 ))
+}
+
+PGVER=$(detect_pg_version)
+
+if [[ "${PGVER}" -lt 15 || "${PGVER}" -gt 17 ]]; then
+  echo "ERROR: PostgreSQL ${PGVER} is not supported (requires 15, 16, or 17)" >&2
+  exit 1
+fi
 
 timestamp() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
