@@ -288,8 +288,11 @@
 -- SCHEDULED JOBS (pg_cron)
 -- ------------------------
 --   telemetry_snapshot  : */5 * * * *   (every 5 minutes)
---   telemetry_sample    : 30 seconds    (every 30 seconds, requires pg_cron 1.4.1+)
+--   telemetry_sample    : 30 seconds    (if pg_cron 1.4.1+) or * * * * * (every minute, fallback)
 --   telemetry_cleanup   : 0 3 * * *     (daily at 3 AM, retains 7 days)
+--
+--   NOTE: The installer auto-detects pg_cron version. If < 1.4.1 (e.g., "1.4-1"),
+--   it falls back to minute-level sampling and logs a notice.
 --
 -- UNINSTALL
 -- ---------
@@ -1503,42 +1506,86 @@ $$;
 -- -----------------------------------------------------------------------------
 
 DO $$
+DECLARE
+    v_pgcron_version TEXT;
+    v_major INT;
+    v_minor INT;
+    v_patch INT;
+    v_supports_subsecond BOOLEAN := FALSE;
+    v_sample_schedule TEXT;
 BEGIN
     -- Remove existing jobs if any
-    PERFORM cron.unschedule('telemetry_snapshot')
-    WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_snapshot');
-    PERFORM cron.unschedule('telemetry_sample')
-    WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_sample');
-    PERFORM cron.unschedule('telemetry_cleanup')
-    WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_cleanup');
+    BEGIN
+        PERFORM cron.unschedule('telemetry_snapshot')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_snapshot');
+        PERFORM cron.unschedule('telemetry_sample')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_sample');
+        PERFORM cron.unschedule('telemetry_cleanup')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_cleanup');
+    EXCEPTION
+        WHEN undefined_table THEN NULL;
+        WHEN undefined_function THEN NULL;
+    END;
+
+    -- Check pg_cron version to determine if sub-minute scheduling is supported
+    -- Sub-minute intervals (e.g., '30 seconds') require pg_cron 1.4.1+
+    SELECT extversion INTO v_pgcron_version
+    FROM pg_extension WHERE extname = 'pg_cron';
+
+    IF v_pgcron_version IS NOT NULL THEN
+        -- Parse version string (handles "1.4.1", "1.4-1", "1.4.1-1", etc.)
+        -- Extract numeric parts, treating "-" as a package revision separator (not a version component)
+        v_pgcron_version := split_part(v_pgcron_version, '-', 1);  -- Strip package revision (e.g., "1.4-1" -> "1.4")
+        v_major := COALESCE(split_part(v_pgcron_version, '.', 1)::int, 0);
+        v_minor := COALESCE(NULLIF(split_part(v_pgcron_version, '.', 2), '')::int, 0);
+        v_patch := COALESCE(NULLIF(split_part(v_pgcron_version, '.', 3), '')::int, 0);
+
+        -- Check if version >= 1.4.1
+        v_supports_subsecond := (v_major > 1)
+            OR (v_major = 1 AND v_minor > 4)
+            OR (v_major = 1 AND v_minor = 4 AND v_patch >= 1);
+    END IF;
+
+    -- Schedule snapshot collection (every 5 minutes) - works on all pg_cron versions
+    PERFORM cron.schedule(
+        'telemetry_snapshot',
+        '*/5 * * * *',
+        'SELECT telemetry.snapshot()'
+    );
+
+    -- Schedule sample collection based on pg_cron capabilities
+    IF v_supports_subsecond THEN
+        v_sample_schedule := '30 seconds';
+        PERFORM cron.schedule(
+            'telemetry_sample',
+            '30 seconds',
+            'SELECT telemetry.sample()'
+        );
+        RAISE NOTICE 'pg_cron % supports sub-minute scheduling. Sampling every 30 seconds.', v_pgcron_version;
+    ELSE
+        v_sample_schedule := '* * * * * (every minute)';
+        PERFORM cron.schedule(
+            'telemetry_sample',
+            '* * * * *',
+            'SELECT telemetry.sample()'
+        );
+        RAISE NOTICE 'pg_cron % does not support sub-minute scheduling (requires 1.4.1+). Sampling every minute instead.', v_pgcron_version;
+    END IF;
+
+    -- Schedule cleanup (daily at 3 AM, retain 7 days)
+    PERFORM cron.schedule(
+        'telemetry_cleanup',
+        '0 3 * * *',
+        'SELECT * FROM telemetry.cleanup(''7 days''::interval)'
+    );
+
 EXCEPTION
-    WHEN undefined_table THEN NULL;
-    WHEN undefined_function THEN NULL;
+    WHEN undefined_table THEN
+        RAISE NOTICE 'pg_cron extension not found. Automatic scheduling disabled. Run telemetry.snapshot() and telemetry.sample() manually or via external scheduler.';
+    WHEN undefined_function THEN
+        RAISE NOTICE 'pg_cron extension not found. Automatic scheduling disabled. Run telemetry.snapshot() and telemetry.sample() manually or via external scheduler.';
 END;
 $$;
-
--- Snapshots every 5 minutes (cumulative stats)
-SELECT cron.schedule(
-    'telemetry_snapshot',
-    '*/5 * * * *',
-    'SELECT telemetry.snapshot()'
-);
-
--- Samples every 30 seconds (wait events, activity, progress, locks)
--- Note: '30 seconds' interval requires pg_cron 1.4.1+
--- For older pg_cron, use '* * * * *' (every minute) instead
-SELECT cron.schedule(
-    'telemetry_sample',
-    '30 seconds',
-    'SELECT telemetry.sample()'
-);
-
--- Cleanup daily at 3 AM (retain 7 days)
-SELECT cron.schedule(
-    'telemetry_cleanup',
-    '0 3 * * *',
-    'SELECT * FROM telemetry.cleanup(''7 days''::interval)'
-);
 
 -- Capture initial snapshot and sample
 SELECT telemetry.snapshot();
@@ -1549,13 +1596,19 @@ SELECT telemetry.sample();
 -- -----------------------------------------------------------------------------
 
 DO $$
+DECLARE
+    v_sample_schedule TEXT;
 BEGIN
+    -- Determine what sampling schedule was configured
+    SELECT schedule INTO v_sample_schedule
+    FROM cron.job WHERE jobname = 'telemetry_sample';
+
     RAISE NOTICE '';
     RAISE NOTICE 'Telemetry installed successfully.';
     RAISE NOTICE '';
     RAISE NOTICE 'Collection schedule:';
     RAISE NOTICE '  - Snapshots: every 5 minutes (WAL, checkpoints, I/O stats)';
-    RAISE NOTICE '  - Samples: every 30 seconds (wait events, activity, progress, locks)';
+    RAISE NOTICE '  - Samples: % (wait events, activity, progress, locks)', COALESCE(v_sample_schedule, 'not scheduled');
     RAISE NOTICE '  - Cleanup: daily at 3 AM (retains 7 days)';
     RAISE NOTICE '';
     RAISE NOTICE 'Quick start for batch monitoring:';
@@ -1581,5 +1634,13 @@ BEGIN
     RAISE NOTICE '  - telemetry.untrack_table(name, schema)';
     RAISE NOTICE '  - telemetry.list_tracked_tables()';
     RAISE NOTICE '';
+EXCEPTION
+    WHEN undefined_table THEN
+        -- pg_cron not available, show generic message
+        RAISE NOTICE '';
+        RAISE NOTICE 'Telemetry installed successfully.';
+        RAISE NOTICE '';
+        RAISE NOTICE 'NOTE: pg_cron not available. Run telemetry.snapshot() and telemetry.sample() manually.';
+        RAISE NOTICE '';
 END;
 $$;
