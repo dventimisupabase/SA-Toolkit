@@ -1,0 +1,72 @@
+# Fly.io configuration for PgBouncer
+# Multi-region connection pooler for Supabase HA
+
+app = "supabase-pgbouncer"  # Change to your app name
+primary_region = "iad"       # US East - change as needed
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # PgBouncer configuration
+  PGBOUNCER_POOL_MODE = "transaction"
+  PGBOUNCER_MAX_CLIENT_CONN = "1000"
+  PGBOUNCER_DEFAULT_POOL_SIZE = "20"
+  PGBOUNCER_MIN_POOL_SIZE = "5"
+  PGBOUNCER_RESERVE_POOL_SIZE = "5"
+  PGBOUNCER_RESERVE_POOL_TIMEOUT = "5"
+  PGBOUNCER_LOG_CONNECTIONS = "1"
+  PGBOUNCER_LOG_DISCONNECTIONS = "1"
+  PGBOUNCER_LOG_POOLER_ERRORS = "1"
+  PGBOUNCER_STATS_PERIOD = "60"
+  PGBOUNCER_SERVER_RESET_QUERY = "DISCARD ALL"
+  PGBOUNCER_SERVER_CHECK_QUERY = "SELECT 1"
+  PGBOUNCER_SERVER_CHECK_DELAY = "30"
+  PGBOUNCER_AUTH_TYPE = "md5"
+  PGBOUNCER_ADMIN_USERS = "pgbouncer"
+
+# Main PostgreSQL port for client connections
+[[services]]
+  internal_port = 5432
+  protocol = "tcp"
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 5432
+
+  # Health check - PgBouncer responds to connections
+  [[services.tcp_checks]]
+    grace_period = "30s"
+    interval = "15s"
+    timeout = "5s"
+
+# Admin port for PgBouncer management (PAUSE/RESUME)
+# Restricted - only accessible via fly ssh
+[[services]]
+  internal_port = 6432
+  protocol = "tcp"
+  auto_stop_machines = false
+  auto_start_machines = true
+
+  [[services.ports]]
+    port = 6432
+
+# Volume for PgBouncer socket and runtime data
+[mounts]
+  source = "pgbouncer_data"
+  destination = "/var/run/pgbouncer"
+
+# Resource allocation
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512
+
+# Secrets (set via `fly secrets set`):
+# - DATABASE_HOST: Supabase direct connection host (db.xxx.supabase.co)
+# - DATABASE_NAME: Database name (postgres)
+# - DATABASE_USER: Database user (postgres)
+# - DATABASE_PASSWORD: Database password
+# - PGBOUNCER_ADMIN_PASSWORD: Password for PgBouncer admin user

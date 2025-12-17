@@ -1,0 +1,60 @@
+;; PgBouncer configuration template
+;; Environment variables are substituted at container startup
+
+[databases]
+;; Wildcard database - routes all connections to upstream
+* = host=${DATABASE_HOST} port=5432 dbname=${DATABASE_NAME} user=${DATABASE_USER} password=${DATABASE_PASSWORD}
+
+;; Alternative: Named database (uncomment if needed)
+;; postgres = host=${DATABASE_HOST} port=5432 dbname=postgres
+
+[pgbouncer]
+;; Network settings
+listen_addr = 0.0.0.0
+listen_port = 5432
+unix_socket_dir = /var/run/pgbouncer
+
+;; Admin console settings
+admin_users = pgbouncer
+stats_users = pgbouncer
+
+;; Authentication
+auth_type = ${PGBOUNCER_AUTH_TYPE}
+auth_file = /etc/pgbouncer/userlist.txt
+
+;; Pool settings
+pool_mode = ${PGBOUNCER_POOL_MODE}
+max_client_conn = ${PGBOUNCER_MAX_CLIENT_CONN}
+default_pool_size = ${PGBOUNCER_DEFAULT_POOL_SIZE}
+min_pool_size = ${PGBOUNCER_MIN_POOL_SIZE}
+reserve_pool_size = ${PGBOUNCER_RESERVE_POOL_SIZE}
+reserve_pool_timeout = ${PGBOUNCER_RESERVE_POOL_TIMEOUT}
+
+;; Connection settings
+server_reset_query = ${PGBOUNCER_SERVER_RESET_QUERY}
+server_check_query = ${PGBOUNCER_SERVER_CHECK_QUERY}
+server_check_delay = ${PGBOUNCER_SERVER_CHECK_DELAY}
+
+;; Timeouts
+server_connect_timeout = 15
+server_login_retry = 3
+client_login_timeout = 60
+query_timeout = 0
+client_idle_timeout = 0
+idle_transaction_timeout = 0
+
+;; Logging
+log_connections = ${PGBOUNCER_LOG_CONNECTIONS}
+log_disconnections = ${PGBOUNCER_LOG_DISCONNECTIONS}
+log_pooler_errors = ${PGBOUNCER_LOG_POOLER_ERRORS}
+stats_period = ${PGBOUNCER_STATS_PERIOD}
+verbose = 0
+
+;; Security
+;; Ignore startup parameters that might cause issues
+ignore_startup_parameters = extra_float_digits
+
+;; TLS (if needed - uncomment and configure)
+;; client_tls_sslmode = prefer
+;; client_tls_key_file = /etc/pgbouncer/server.key
+;; client_tls_cert_file = /etc/pgbouncer/server.crt

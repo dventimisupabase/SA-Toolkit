@@ -1,0 +1,21 @@
+;; PgBouncer user authentication file
+;; Format: "username" "password_hash_or_plaintext"
+;;
+;; Password format options:
+;; - Plain text (not recommended): "user" "password"
+;; - MD5 hash: "user" "md5<hash>"
+;; - SCRAM-SHA-256: "user" "SCRAM-SHA-256$<iterations>:<salt>$<stored_key>:<server_key>"
+;;
+;; For MD5, generate hash with:
+;;   echo -n "passwordusername" | md5sum | cut -d' ' -f1
+;;   Then prefix with "md5"
+
+;; Database user (connects to Supabase)
+;; Using plain text here - password substituted from environment
+"${DATABASE_USER}" "${DATABASE_PASSWORD}"
+
+;; Admin user for PgBouncer console (PAUSE/RESUME/SHOW commands)
+"pgbouncer" "${PGBOUNCER_ADMIN_PASSWORD}"
+
+;; Additional application users (add as needed)
+;; "app_user" "app_password"
