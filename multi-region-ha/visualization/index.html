@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Multi-Region Supabase HA/DR Visualization</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --primary: #22c55e;
+      --primary-light: #4ade80;
+      --secondary: #3b82f6;
+      --standby: #6b7280;
+      --standby-light: #9ca3af;
+      --warning: #ef4444;
+      --external: #f59e0b;
+      --bg-dark: #111827;
+      --bg-card: #1f2937;
+      --bg-hover: #374151;
+      --text: #f9fafb;
+      --text-muted: #9ca3af;
+      --border: #374151;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: var(--bg-dark);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background: var(--bg-card);
+      padding: 1.5rem 2rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+    }
+
+    h1 span {
+      color: var(--primary);
+    }
+
+    .tabs {
+      display: flex;
+      gap: 0.5rem;
+    }
+
+    .tab {
+      padding: 0.75rem 1.5rem;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 0.875rem;
+      transition: all 0.2s ease;
+    }
+
+    .tab:hover {
+      background: var(--bg-hover);
+      color: var(--text);
+    }
+
+    .tab.active {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: var(--bg-dark);
+      font-weight: 500;
+    }
+
+    main {
+      flex: 1;
+      padding: 2rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .view {
+      display: none;
+      width: 100%;
+      max-width: 1200px;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .view.active {
+      display: flex;
+    }
+
+    .description {
+      text-align: center;
+      margin-bottom: 1.5rem;
+      color: var(--text-muted);
+      max-width: 700px;
+      line-height: 1.6;
+    }
+
+    .controls {
+      display: flex;
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .btn {
+      padding: 0.625rem 1.25rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      color: var(--text);
+      cursor: pointer;
+      font-size: 0.875rem;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .btn:hover {
+      background: var(--bg-hover);
+      border-color: var(--primary);
+    }
+
+    .btn.primary {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: var(--bg-dark);
+    }
+
+    .btn.primary:hover {
+      background: var(--primary-light);
+    }
+
+    .step-indicator {
+      background: var(--bg-card);
+      padding: 0.5rem 1rem;
+      border-radius: 0.5rem;
+      font-size: 0.875rem;
+      color: var(--text-muted);
+    }
+
+    .step-indicator strong {
+      color: var(--primary);
+    }
+
+    .diagram-container {
+      background: var(--bg-card);
+      border-radius: 1rem;
+      padding: 2rem;
+      width: 100%;
+      overflow: hidden;
+    }
+
+    svg {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    /* SVG Styles */
+    .component {
+      cursor: pointer;
+      transition: transform 0.2s ease;
+    }
+
+    .component:hover {
+      transform: scale(1.02);
+    }
+
+    .component-box {
+      fill: var(--bg-hover);
+      stroke: var(--border);
+      stroke-width: 2;
+      rx: 8;
+      transition: all 0.3s ease;
+    }
+
+    .component-box.primary-active {
+      stroke: var(--primary);
+      stroke-width: 3;
+    }
+
+    .component-box.standby {
+      opacity: 0.6;
+    }
+
+    .component-box.frozen {
+      stroke: var(--warning);
+      stroke-width: 3;
+      fill: rgba(239, 68, 68, 0.1);
+    }
+
+    .component-box.promoted {
+      stroke: var(--primary);
+      stroke-width: 3;
+    }
+
+    .component-label {
+      fill: var(--text);
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .component-sublabel {
+      fill: var(--text-muted);
+      font-size: 11px;
+    }
+
+    .connection {
+      stroke: var(--standby);
+      stroke-width: 2;
+      fill: none;
+      stroke-dasharray: 8, 4;
+    }
+
+    .connection.active {
+      stroke: var(--primary);
+      animation: dash 1s linear infinite;
+    }
+
+    .connection.replication {
+      stroke: var(--secondary);
+      stroke-dasharray: 12, 6;
+    }
+
+    .connection.paused {
+      stroke: var(--warning);
+      opacity: 0.5;
+    }
+
+    @keyframes dash {
+      to {
+        stroke-dashoffset: -24;
+      }
+    }
+
+    .data-packet {
+      fill: var(--primary);
+      opacity: 0;
+    }
+
+    .data-packet.animate {
+      animation: flowPacket 2s ease-in-out infinite;
+    }
+
+    @keyframes flowPacket {
+      0% { opacity: 0; }
+      10% { opacity: 1; }
+      90% { opacity: 1; }
+      100% { opacity: 0; }
+    }
+
+    .region-label {
+      fill: var(--text);
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .region-badge {
+      fill: var(--primary);
+      rx: 4;
+    }
+
+    .region-badge.standby {
+      fill: var(--standby);
+    }
+
+    .region-badge-text {
+      fill: white;
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    .icon {
+      fill: var(--text-muted);
+    }
+
+    .icon.active {
+      fill: var(--primary);
+    }
+
+    /* Tooltip */
+    .tooltip {
+      position: fixed;
+      background: var(--bg-dark);
+      border: 1px solid var(--border);
+      padding: 0.75rem 1rem;
+      border-radius: 0.5rem;
+      font-size: 0.875rem;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      z-index: 1000;
+      max-width: 300px;
+    }
+
+    .tooltip.visible {
+      opacity: 1;
+    }
+
+    .tooltip-title {
+      font-weight: 600;
+      margin-bottom: 0.25rem;
+    }
+
+    .tooltip-desc {
+      color: var(--text-muted);
+      font-size: 0.8125rem;
+    }
+
+    /* Step description */
+    .step-description {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      padding: 1rem 1.5rem;
+      margin-top: 1.5rem;
+      max-width: 600px;
+      text-align: center;
+    }
+
+    .step-description h3 {
+      color: var(--primary);
+      font-size: 1rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .step-description p {
+      color: var(--text-muted);
+      font-size: 0.875rem;
+    }
+
+    /* Legend */
+    footer {
+      background: var(--bg-card);
+      padding: 1rem 2rem;
+      border-top: 1px solid var(--border);
+    }
+
+    .legend {
+      display: flex;
+      justify-content: center;
+      gap: 2rem;
+      flex-wrap: wrap;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.8125rem;
+      color: var(--text-muted);
+    }
+
+    .legend-color {
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+    }
+
+    .legend-color.primary { background: var(--primary); }
+    .legend-color.standby { background: var(--standby); }
+    .legend-color.warning { background: var(--warning); }
+    .legend-color.external { background: var(--external); }
+    .legend-color.replication { background: var(--secondary); }
+
+    /* Queue animation */
+    .queue-packet {
+      fill: var(--external);
+      opacity: 0;
+    }
+
+    .queue-packet.visible {
+      opacity: 1;
+      animation: pulse 1s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 0.8; }
+      50% { transform: scale(1.1); opacity: 1; }
+    }
+
+    /* Sequence numbers */
+    .sequence-num {
+      fill: var(--primary);
+      font-size: 12px;
+      font-weight: 600;
+      opacity: 0;
+    }
+
+    .sequence-num.animate {
+      animation: seqMove 1.5s ease-in-out forwards;
+    }
+
+    @keyframes seqMove {
+      0% { opacity: 1; transform: translateX(0); }
+      100% { opacity: 1; transform: translateX(350px); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Multi-Region <span>Supabase</span> HA/DR</h1>
+    <div class="tabs">
+      <button class="tab active" onclick="showTab('architecture')">Architecture</button>
+      <button class="tab" onclick="showTab('normal-flow')">Normal Operation</button>
+      <button class="tab" onclick="showTab('failover')">Failover Process</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Architecture View -->
+    <div id="architecture" class="view active">
+      <p class="description">
+        A single-writer, multi-region disaster recovery architecture for Supabase.
+        Hover over components to learn more about their role.
+      </p>
+      <div class="diagram-container">
+        <svg viewBox="0 0 900 500" id="arch-svg">
+          <!-- Applications -->
+          <g class="component" data-tooltip="Applications" data-desc="Your application servers connect through PgBouncer for database access.">
+            <rect class="component-box" x="380" y="20" width="140" height="60"/>
+            <text class="component-label" x="450" y="45" text-anchor="middle">Applications</text>
+            <text class="component-sublabel" x="450" y="62" text-anchor="middle">Web / Mobile / API</text>
+          </g>
+
+          <!-- PgBouncer -->
+          <g class="component" data-tooltip="PgBouncer on Fly.io" data-desc="Connection pooler providing stable endpoint. Supports PAUSE/RESUME for zero-downtime failover.">
+            <rect class="component-box primary-active" x="350" y="120" width="200" height="70"/>
+            <text class="component-label" x="450" y="150" text-anchor="middle">PgBouncer</text>
+            <text class="component-sublabel" x="450" y="168" text-anchor="middle">Fly.io Multi-Region</text>
+          </g>
+
+          <!-- Region A -->
+          <g class="region-a">
+            <rect x="50" y="230" width="350" height="250" fill="none" stroke="var(--primary)" stroke-width="2" stroke-dasharray="8,4" rx="12"/>
+            <rect class="region-badge" x="60" y="220" width="80" height="22"/>
+            <text class="region-badge-text" x="100" y="235" text-anchor="middle">PRIMARY</text>
+            <text class="region-label" x="225" y="260" text-anchor="middle">Region A</text>
+
+            <g class="component" data-tooltip="Supabase Project A" data-desc="Primary writer. All write operations go here. Source for logical replication.">
+              <rect class="component-box primary-active" x="80" y="280" width="290" height="180"/>
+              <text class="component-label" x="225" y="305" text-anchor="middle">Supabase Project A</text>
+
+              <!-- PostgreSQL -->
+              <rect x="100" y="320" width="110" height="40" fill="var(--bg-dark)" stroke="var(--primary)" stroke-width="2" rx="4"/>
+              <text x="155" y="345" text-anchor="middle" fill="var(--text)" font-size="12">PostgreSQL</text>
+
+              <!-- Storage -->
+              <rect x="240" y="320" width="110" height="40" fill="var(--bg-dark)" stroke="var(--border)" stroke-width="1" rx="4"/>
+              <text x="295" y="345" text-anchor="middle" fill="var(--text-muted)" font-size="12">Storage</text>
+
+              <!-- Realtime -->
+              <rect x="100" y="380" width="110" height="40" fill="var(--bg-dark)" stroke="var(--border)" stroke-width="1" rx="4"/>
+              <text x="155" y="405" text-anchor="middle" fill="var(--text-muted)" font-size="12">Realtime</text>
+
+              <!-- Edge Functions -->
+              <rect x="240" y="380" width="110" height="40" fill="var(--bg-dark)" stroke="var(--border)" stroke-width="1" rx="4"/>
+              <text x="295" y="405" text-anchor="middle" fill="var(--text-muted)" font-size="12">Edge Fn</text>
+            </g>
+          </g>
+
+          <!-- Region B -->
+          <g class="region-b">
+            <rect x="500" y="230" width="350" height="250" fill="none" stroke="var(--standby)" stroke-width="2" stroke-dasharray="8,4" rx="12"/>
+            <rect class="region-badge standby" x="510" y="220" width="80" height="22"/>
+            <text class="region-badge-text" x="550" y="235" text-anchor="middle">STANDBY</text>
+            <text class="region-label" x="675" y="260" text-anchor="middle" fill="var(--standby)">Region B</text>
+
+            <g class="component" data-tooltip="Supabase Project B" data-desc="Warm standby. Read-only, receives CDC via logical replication. Ready for promotion.">
+              <rect class="component-box standby" x="530" y="280" width="290" height="180"/>
+              <text class="component-label" x="675" y="305" text-anchor="middle" fill="var(--standby)">Supabase Project B</text>
+
+              <!-- PostgreSQL -->
+              <rect x="550" y="320" width="110" height="40" fill="var(--bg-dark)" stroke="var(--standby)" stroke-width="1" rx="4"/>
+              <text x="605" y="345" text-anchor="middle" fill="var(--standby)" font-size="12">PostgreSQL</text>
+
+              <!-- Storage -->
+              <rect x="690" y="320" width="110" height="40" fill="var(--bg-dark)" stroke="var(--border)" stroke-width="1" rx="4" opacity="0.5"/>
+              <text x="745" y="345" text-anchor="middle" fill="var(--standby)" font-size="12">Storage</text>
+
+              <!-- Realtime -->
+              <rect x="550" y="380" width="110" height="40" fill="var(--bg-dark)" stroke="var(--border)" stroke-width="1" rx="4" opacity="0.5"/>
+              <text x="605" y="405" text-anchor="middle" fill="var(--standby)" font-size="12">Realtime</text>
+
+              <!-- Edge Functions -->
+              <rect x="690" y="380" width="110" height="40" fill="var(--bg-dark)" stroke="var(--border)" stroke-width="1" rx="4" opacity="0.5"/>
+              <text x="745" y="405" text-anchor="middle" fill="var(--standby)" font-size="12">Edge Fn</text>
+            </g>
+          </g>
+
+          <!-- Connections -->
+          <line class="connection active" x1="450" y1="80" x2="450" y2="120"/>
+          <line class="connection active" x1="450" y1="190" x2="225" y2="280"/>
+          <path class="connection replication" d="M 370 340 Q 450 340 530 340" marker-end="url(#arrowhead)"/>
+
+          <!-- Replication label -->
+          <text x="450" y="330" text-anchor="middle" fill="var(--secondary)" font-size="10">Logical Replication</text>
+
+          <!-- Arrow marker -->
+          <defs>
+            <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+              <polygon points="0 0, 10 3.5, 0 7" fill="var(--secondary)"/>
+            </marker>
+          </defs>
+        </svg>
+      </div>
+    </div>
+
+    <!-- Normal Flow View -->
+    <div id="normal-flow" class="view">
+      <p class="description">
+        Watch how data flows during normal operation. Write requests go through PgBouncer to the primary,
+        while changes are continuously replicated to the standby.
+      </p>
+      <div class="controls">
+        <button class="btn primary" id="flow-play-btn" onclick="toggleFlow()">
+          <span id="flow-icon">▶</span> Play
+        </button>
+        <button class="btn" onclick="resetFlow()">↺ Reset</button>
+      </div>
+      <div class="diagram-container">
+        <svg viewBox="0 0 900 450" id="flow-svg">
+          <!-- Applications -->
+          <g class="component">
+            <rect class="component-box" x="380" y="20" width="140" height="50"/>
+            <text class="component-label" x="450" y="50" text-anchor="middle">Applications</text>
+          </g>
+
+          <!-- PgBouncer -->
+          <g class="component">
+            <rect class="component-box primary-active" x="370" y="110" width="160" height="50"/>
+            <text class="component-label" x="450" y="140" text-anchor="middle">PgBouncer</text>
+          </g>
+
+          <!-- Primary DB -->
+          <g class="component">
+            <rect class="component-box primary-active" x="130" y="200" width="180" height="80"/>
+            <text class="component-label" x="220" y="235" text-anchor="middle">Primary</text>
+            <text class="component-sublabel" x="220" y="255" text-anchor="middle">PostgreSQL (Writes)</text>
+          </g>
+
+          <!-- Standby DB -->
+          <g class="component">
+            <rect class="component-box standby" x="590" y="200" width="180" height="80"/>
+            <text class="component-label" x="680" y="235" text-anchor="middle" fill="var(--standby)">Standby</text>
+            <text class="component-sublabel" x="680" y="255" text-anchor="middle">PostgreSQL (Read-Only)</text>
+          </g>
+
+          <!-- External Storage -->
+          <g class="component">
+            <rect class="component-box" x="360" y="340" width="180" height="60" fill="var(--bg-hover)" stroke="var(--external)"/>
+            <text class="component-label" x="450" y="375" text-anchor="middle" fill="var(--external)">External Storage</text>
+          </g>
+
+          <!-- Connection paths -->
+          <path id="path-app-pgb" class="connection" d="M 450 70 L 450 110" stroke="var(--standby)"/>
+          <path id="path-pgb-primary" class="connection" d="M 400 160 Q 300 180 270 200" stroke="var(--standby)"/>
+          <path id="path-replication" class="connection replication" d="M 310 240 Q 450 240 590 240"/>
+          <path id="path-app-storage" class="connection" d="M 500 70 Q 600 150 500 340" stroke="var(--external)" stroke-dasharray="4,4"/>
+
+          <!-- Data packets -->
+          <circle class="data-packet" id="packet-1" r="6" cx="450" cy="70"/>
+          <circle class="data-packet" id="packet-2" r="6" cx="350" cy="180"/>
+          <circle class="data-packet" id="packet-3" r="5" cx="400" cy="240" fill="var(--secondary)"/>
+
+          <!-- Labels -->
+          <text x="460" y="95" fill="var(--text-muted)" font-size="10">Queries</text>
+          <text x="450" y="230" text-anchor="middle" fill="var(--secondary)" font-size="10">CDC Stream</text>
+          <text x="560" y="200" fill="var(--external)" font-size="10">Files</text>
+        </svg>
+      </div>
+    </div>
+
+    <!-- Failover View -->
+    <div id="failover" class="view">
+      <p class="description">
+        Step through the 6-phase failover process. Each step ensures data consistency
+        and prevents split-brain scenarios.
+      </p>
+      <div class="controls">
+        <button class="btn" onclick="prevStep()" id="prev-btn" disabled>← Previous</button>
+        <span class="step-indicator">Step <strong id="step-num">0</strong> / 6</span>
+        <button class="btn primary" onclick="nextStep()" id="next-btn">Next →</button>
+        <button class="btn" onclick="resetFailover()">↺ Reset</button>
+      </div>
+      <div class="diagram-container">
+        <svg viewBox="0 0 900 400" id="failover-svg">
+          <!-- PgBouncer -->
+          <g class="component">
+            <rect class="component-box primary-active" id="pgb-box" x="360" y="30" width="180" height="60"/>
+            <text class="component-label" x="450" y="55" text-anchor="middle">PgBouncer</text>
+            <text class="component-sublabel" x="450" y="72" text-anchor="middle" id="pgb-status">Active</text>
+          </g>
+
+          <!-- Queue packets (hidden initially) -->
+          <g id="queue-group">
+            <circle class="queue-packet" id="q1" r="5" cx="360" cy="60"/>
+            <circle class="queue-packet" id="q2" r="5" cx="348" cy="55"/>
+            <circle class="queue-packet" id="q3" r="5" cx="348" cy="65"/>
+            <circle class="queue-packet" id="q4" r="5" cx="336" cy="60"/>
+          </g>
+
+          <!-- Primary -->
+          <g id="primary-group">
+            <rect x="80" y="130" width="300" height="240" fill="none" stroke="var(--primary)" stroke-width="2" stroke-dasharray="8,4" rx="12" id="primary-border"/>
+            <rect class="region-badge" x="90" y="120" width="80" height="22" id="primary-badge"/>
+            <text class="region-badge-text" x="130" y="135" text-anchor="middle" id="primary-badge-text">PRIMARY</text>
+
+            <rect class="component-box primary-active" id="primary-box" x="110" y="170" width="240" height="100"/>
+            <text class="component-label" x="230" y="210" text-anchor="middle">Region A</text>
+            <text class="component-sublabel" x="230" y="230" text-anchor="middle" id="primary-sublabel">PostgreSQL</text>
+
+            <!-- Sequence display -->
+            <text x="230" y="320" text-anchor="middle" fill="var(--text-muted)" font-size="11">Sequences: </text>
+            <text x="230" y="340" text-anchor="middle" fill="var(--primary)" font-size="14" font-weight="600" id="primary-seq">10,547</text>
+          </g>
+
+          <!-- Standby -->
+          <g id="standby-group">
+            <rect x="520" y="130" width="300" height="240" fill="none" stroke="var(--standby)" stroke-width="2" stroke-dasharray="8,4" rx="12" id="standby-border"/>
+            <rect class="region-badge standby" x="530" y="120" width="80" height="22" id="standby-badge"/>
+            <text class="region-badge-text" x="570" y="135" text-anchor="middle" id="standby-badge-text">STANDBY</text>
+
+            <rect class="component-box standby" id="standby-box" x="550" y="170" width="240" height="100"/>
+            <text class="component-label" x="670" y="210" text-anchor="middle" fill="var(--standby)" id="standby-label">Region B</text>
+            <text class="component-sublabel" x="670" y="230" text-anchor="middle" id="standby-sublabel">PostgreSQL</text>
+
+            <!-- Sequence display -->
+            <text x="670" y="320" text-anchor="middle" fill="var(--text-muted)" font-size="11">Sequences: </text>
+            <text x="670" y="340" text-anchor="middle" fill="var(--standby)" font-size="14" font-weight="600" id="standby-seq">10,520</text>
+          </g>
+
+          <!-- Connection -->
+          <path class="connection active" id="main-connection" d="M 450 90 L 230 170"/>
+          <path class="connection replication" id="replication-line" d="M 350 220 Q 450 220 550 220"/>
+
+          <!-- Active region flag -->
+          <g id="flag-group" transform="translate(410, 130)">
+            <rect width="80" height="30" fill="var(--bg-card)" stroke="var(--border)" rx="4"/>
+            <text x="40" y="20" text-anchor="middle" fill="var(--text-muted)" font-size="10">Active:</text>
+            <circle id="flag-indicator" cx="65" cy="15" r="6" fill="var(--primary)"/>
+          </g>
+        </svg>
+      </div>
+      <div class="step-description" id="step-desc">
+        <h3>Ready to Begin</h3>
+        <p>Click "Next" to start the failover simulation. Each step shows a critical phase of the process.</p>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="legend">
+      <div class="legend-item">
+        <div class="legend-color primary"></div>
+        <span>Primary / Active</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-color standby"></div>
+        <span>Standby / Inactive</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-color replication"></div>
+        <span>Replication Stream</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-color warning"></div>
+        <span>Frozen / Paused</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-color external"></div>
+        <span>External Storage</span>
+      </div>
+    </div>
+  </footer>
+
+  <div class="tooltip" id="tooltip">
+    <div class="tooltip-title"></div>
+    <div class="tooltip-desc"></div>
+  </div>
+
+  <script>
+    // Tab navigation
+    function showTab(tabName) {
+      document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+      document.querySelectorAll('.view').forEach(view => view.classList.remove('active'));
+
+      document.querySelector(`[onclick="showTab('${tabName}')"]`).classList.add('active');
+      document.getElementById(tabName).classList.add('active');
+
+      // Reset animations when switching
+      if (tabName === 'normal-flow') {
+        resetFlow();
+      } else if (tabName === 'failover') {
+        resetFailover();
+      }
+    }
+
+    // Tooltip handling
+    const tooltip = document.getElementById('tooltip');
+    document.querySelectorAll('.component[data-tooltip]').forEach(comp => {
+      comp.addEventListener('mouseenter', (e) => {
+        const title = comp.getAttribute('data-tooltip');
+        const desc = comp.getAttribute('data-desc');
+        tooltip.querySelector('.tooltip-title').textContent = title;
+        tooltip.querySelector('.tooltip-desc').textContent = desc;
+        tooltip.classList.add('visible');
+      });
+
+      comp.addEventListener('mousemove', (e) => {
+        tooltip.style.left = (e.clientX + 15) + 'px';
+        tooltip.style.top = (e.clientY + 15) + 'px';
+      });
+
+      comp.addEventListener('mouseleave', () => {
+        tooltip.classList.remove('visible');
+      });
+    });
+
+    // Normal flow animation
+    let flowInterval = null;
+    let flowRunning = false;
+
+    function toggleFlow() {
+      if (flowRunning) {
+        pauseFlow();
+      } else {
+        startFlow();
+      }
+    }
+
+    function startFlow() {
+      flowRunning = true;
+      document.getElementById('flow-play-btn').innerHTML = '<span>⏸</span> Pause';
+
+      // Animate connections
+      document.querySelectorAll('#flow-svg .connection').forEach(conn => {
+        conn.classList.add('active');
+      });
+
+      // Animate packets
+      document.querySelectorAll('.data-packet').forEach(packet => {
+        packet.classList.add('animate');
+      });
+    }
+
+    function pauseFlow() {
+      flowRunning = false;
+      document.getElementById('flow-play-btn').innerHTML = '<span>▶</span> Play';
+
+      document.querySelectorAll('.data-packet').forEach(packet => {
+        packet.classList.remove('animate');
+      });
+    }
+
+    function resetFlow() {
+      pauseFlow();
+      document.querySelectorAll('#flow-svg .connection').forEach(conn => {
+        conn.classList.remove('active');
+      });
+    }
+
+    // Failover simulation
+    let currentStep = 0;
+    const steps = [
+      {
+        title: 'Ready to Begin',
+        desc: 'Click "Next" to start the failover simulation. Each step shows a critical phase of the process.'
+      },
+      {
+        title: 'Step 1: Pause PgBouncer',
+        desc: 'PgBouncer pauses all pools. Existing connections complete their transaction, new connections queue.',
+        action: () => {
+          document.getElementById('pgb-box').style.stroke = 'var(--warning)';
+          document.getElementById('pgb-status').textContent = 'PAUSED';
+          document.getElementById('pgb-status').style.fill = 'var(--warning)';
+          document.querySelectorAll('.queue-packet').forEach(p => p.classList.add('visible'));
+          document.getElementById('main-connection').classList.add('paused');
+          document.getElementById('main-connection').classList.remove('active');
+        }
+      },
+      {
+        title: 'Step 2: Freeze Primary',
+        desc: 'Primary database set to read-only. No new writes accepted. Prevents split-brain.',
+        action: () => {
+          document.getElementById('primary-box').classList.add('frozen');
+          document.getElementById('primary-box').classList.remove('primary-active');
+          document.getElementById('primary-sublabel').textContent = 'READ-ONLY';
+          document.getElementById('primary-sublabel').style.fill = 'var(--warning)';
+        }
+      },
+      {
+        title: 'Step 3: Sync Sequences',
+        desc: 'Sequence values copied from primary to standby with +10,000 buffer to prevent conflicts.',
+        action: () => {
+          document.getElementById('standby-seq').textContent = '20,547';
+          document.getElementById('standby-seq').style.fill = 'var(--primary)';
+          // Flash effect
+          document.getElementById('standby-seq').style.animation = 'pulse 0.5s ease-in-out 3';
+        }
+      },
+      {
+        title: 'Step 4: Flip Active Region Flag',
+        desc: 'Global flag updated to point to Region B. Edge Functions and routing now target standby.',
+        action: () => {
+          const flag = document.getElementById('flag-indicator');
+          flag.style.transition = 'transform 0.5s ease';
+          flag.style.transform = 'translateX(0)';
+          flag.style.fill = 'var(--primary)';
+        }
+      },
+      {
+        title: 'Step 5: Promote Standby',
+        desc: 'Subscription dropped on standby. Database now accepts writes. Region B is the new primary.',
+        action: () => {
+          // Update standby to primary
+          document.getElementById('standby-box').classList.remove('standby');
+          document.getElementById('standby-box').classList.add('primary-active');
+          document.getElementById('standby-border').style.stroke = 'var(--primary)';
+          document.getElementById('standby-badge').classList.remove('standby');
+          document.getElementById('standby-badge').style.fill = 'var(--primary)';
+          document.getElementById('standby-badge-text').textContent = 'PRIMARY';
+          document.getElementById('standby-label').style.fill = 'var(--text)';
+          document.getElementById('standby-sublabel').textContent = 'PostgreSQL (Writes)';
+          document.getElementById('standby-sublabel').style.fill = 'var(--text-muted)';
+
+          // Update old primary
+          document.getElementById('primary-badge').style.fill = 'var(--standby)';
+          document.getElementById('primary-badge-text').textContent = 'OFFLINE';
+          document.getElementById('primary-border').style.stroke = 'var(--standby)';
+
+          // Remove replication line
+          document.getElementById('replication-line').style.opacity = '0.2';
+        }
+      },
+      {
+        title: 'Step 6: Resume PgBouncer',
+        desc: 'PgBouncer upstream swapped to new primary. Connections resume. Failover complete!',
+        action: () => {
+          document.getElementById('pgb-box').style.stroke = 'var(--primary)';
+          document.getElementById('pgb-status').textContent = 'Active';
+          document.getElementById('pgb-status').style.fill = 'var(--primary)';
+          document.querySelectorAll('.queue-packet').forEach(p => p.classList.remove('visible'));
+
+          // Update connection to point to new primary
+          document.getElementById('main-connection').setAttribute('d', 'M 450 90 L 670 170');
+          document.getElementById('main-connection').classList.remove('paused');
+          document.getElementById('main-connection').classList.add('active');
+        }
+      }
+    ];
+
+    function updateStepUI() {
+      document.getElementById('step-num').textContent = currentStep;
+      document.getElementById('prev-btn').disabled = currentStep === 0;
+      document.getElementById('next-btn').disabled = currentStep === 6;
+      document.getElementById('next-btn').textContent = currentStep === 6 ? 'Complete ✓' : 'Next →';
+
+      const step = steps[currentStep];
+      document.getElementById('step-desc').innerHTML = `<h3>${step.title}</h3><p>${step.desc}</p>`;
+    }
+
+    function nextStep() {
+      if (currentStep < 6) {
+        currentStep++;
+        if (steps[currentStep].action) {
+          steps[currentStep].action();
+        }
+        updateStepUI();
+      }
+    }
+
+    function prevStep() {
+      if (currentStep > 0) {
+        currentStep--;
+        // Reset and replay up to current step
+        resetFailoverVisuals();
+        for (let i = 1; i <= currentStep; i++) {
+          if (steps[i].action) steps[i].action();
+        }
+        updateStepUI();
+      }
+    }
+
+    function resetFailoverVisuals() {
+      // Reset PgBouncer
+      document.getElementById('pgb-box').style.stroke = 'var(--primary)';
+      document.getElementById('pgb-status').textContent = 'Active';
+      document.getElementById('pgb-status').style.fill = 'var(--text-muted)';
+      document.querySelectorAll('.queue-packet').forEach(p => p.classList.remove('visible'));
+
+      // Reset Primary
+      document.getElementById('primary-box').classList.remove('frozen');
+      document.getElementById('primary-box').classList.add('primary-active');
+      document.getElementById('primary-sublabel').textContent = 'PostgreSQL';
+      document.getElementById('primary-sublabel').style.fill = 'var(--text-muted)';
+      document.getElementById('primary-badge').style.fill = 'var(--primary)';
+      document.getElementById('primary-badge-text').textContent = 'PRIMARY';
+      document.getElementById('primary-border').style.stroke = 'var(--primary)';
+      document.getElementById('primary-seq').textContent = '10,547';
+
+      // Reset Standby
+      document.getElementById('standby-box').classList.add('standby');
+      document.getElementById('standby-box').classList.remove('primary-active');
+      document.getElementById('standby-border').style.stroke = 'var(--standby)';
+      document.getElementById('standby-badge').classList.add('standby');
+      document.getElementById('standby-badge').style.fill = 'var(--standby)';
+      document.getElementById('standby-badge-text').textContent = 'STANDBY';
+      document.getElementById('standby-label').style.fill = 'var(--standby)';
+      document.getElementById('standby-sublabel').textContent = 'PostgreSQL';
+      document.getElementById('standby-sublabel').style.fill = 'var(--text-muted)';
+      document.getElementById('standby-seq').textContent = '10,520';
+      document.getElementById('standby-seq').style.fill = 'var(--standby)';
+      document.getElementById('standby-seq').style.animation = '';
+
+      // Reset connections
+      document.getElementById('main-connection').setAttribute('d', 'M 450 90 L 230 170');
+      document.getElementById('main-connection').classList.remove('paused');
+      document.getElementById('main-connection').classList.add('active');
+      document.getElementById('replication-line').style.opacity = '1';
+
+      // Reset flag
+      document.getElementById('flag-indicator').style.transform = '';
+    }
+
+    function resetFailover() {
+      currentStep = 0;
+      resetFailoverVisuals();
+      updateStepUI();
+    }
+
+    // Initialize
+    updateStepUI();
+  </script>
+</body>
+</html>
