@@ -23,6 +23,8 @@
 --      - Checkpoints: timed/requested count, write/sync time, buffers
 --      - BGWriter: buffers clean/alloc/backend (backend writes = pressure)
 --      - Replication slots: count, max retained WAL bytes
+--      - Replication lag: per-replica write_lag, flush_lag, replay_lag
+--      - Temp files: cumulative temp files and bytes (work_mem spills)
 --      - pg_stat_io (PG16+): I/O by backend type
 --      - Per-table stats for tracked tables: size, tuples, vacuum activity
 --
@@ -92,7 +94,8 @@
 --   telemetry.deltas
 --       Changes between consecutive snapshots.
 --       Key columns: checkpoint_occurred, wal_bytes_delta, wal_bytes_pretty,
---                    ckpt_write_time_ms, bgw_buffers_backend_delta
+--                    ckpt_write_time_ms, bgw_buffers_backend_delta,
+--                    temp_files_delta, temp_bytes_pretty
 --
 --   telemetry.table_deltas
 --       Changes to tracked tables between consecutive snapshots.
@@ -117,6 +120,11 @@
 --       Operation progress (vacuum/copy/analyze/create_index) from last 2 hours.
 --       Columns: captured_at, progress_type, pid, relname, phase,
 --                blocks_pct, tuples_done, bytes_done_pretty
+--
+--   telemetry.recent_replication
+--       Replication lag from last 2 hours.
+--       Columns: captured_at, application_name, state, sync_state,
+--                replay_lag_bytes, replay_lag_pretty, write_lag, flush_lag, replay_lag
 --
 -- INTERPRETING RESULTS
 -- --------------------
@@ -149,6 +157,17 @@
 --     - LWLock:BufferContent => buffer contention
 --     - IO:DataFileRead/Write => disk I/O bottleneck
 --     - Lock:transactionid => row-level lock contention
+--
+--   Temp file spills (work_mem exhaustion):
+--     - temp_files_delta > 0 => sorts/hashes spilling to disk
+--     - Large temp_bytes_delta => significant disk I/O from spills
+--     - Resolution: increase work_mem (per-session or globally)
+--
+--   Replication lag (sync replication):
+--     - recent_replication shows large replay_lag_bytes
+--     - write_lag/flush_lag/replay_lag intervals growing
+--     - With sync replication, batch waits for replica acknowledgment
+--     - Resolution: check replica health, network latency, or switch to async
 --
 -- DIAGNOSTIC PATTERNS (from real-world testing)
 -- ---------------------------------------------
@@ -207,13 +226,35 @@
 --     - Use ALTER TABLE ... SET (autovacuum_enabled = false) temporarily
 --     - Increase autovacuum_vacuum_cost_delay to slow vacuum during batch
 --
+--   PATTERN 5: Temp File Spills (work_mem exhaustion)
+--   Symptoms:
+--     - Batch with complex queries (JOINs, sorts, aggregations) runs slowly
+--     - compare() shows temp_files_delta > 0
+--     - Large temp_bytes_delta (e.g., hundreds of MB or GB)
+--   Resolution:
+--     - Increase work_mem for the session: SET work_mem = '256MB';
+--     - Optimize query to reduce memory usage (add indexes, limit result sets)
+--     - Consider maintenance_work_mem for CREATE INDEX or VACUUM
+--
+--   PATTERN 6: Replication Lag (sync replication)
+--   Symptoms:
+--     - Batch runs slowly despite no local resource contention
+--     - recent_replication shows large replay_lag_bytes
+--     - write_lag/flush_lag intervals in seconds or more
+--     - synchronous_commit = on with synchronous_standby_names set
+--   Resolution:
+--     - Check replica health (disk I/O, network, CPU)
+--     - Consider switching to asynchronous replication for batch jobs
+--     - Use SET LOCAL synchronous_commit = off; within batch transaction
+--
 --   QUICK DIAGNOSIS CHECKLIST
 --   -------------------------
 --   For a slow batch between START_TIME and END_TIME:
 --
 --   1. Overall health:
 --      SELECT * FROM telemetry.compare('START_TIME', 'END_TIME');
---      => Check: checkpoint_occurred, bgw_buffers_backend_delta, wal_bytes
+--      => Check: checkpoint_occurred, bgw_buffers_backend_delta, wal_bytes,
+--                temp_files_delta, temp_bytes_pretty
 --
 --   2. Lock contention:
 --      SELECT * FROM telemetry.recent_locks
@@ -232,6 +273,11 @@
 --      SELECT * FROM telemetry.recent_progress
 --      WHERE captured_at BETWEEN 'START_TIME' AND 'END_TIME';
 --      => Check: overlapping vacuum, COPY, or index builds
+--
+--   6. Replication lag (if using sync replication):
+--      SELECT * FROM telemetry.recent_replication
+--      WHERE captured_at BETWEEN 'START_TIME' AND 'END_TIME';
+--      => Check: replay_lag_bytes, write_lag/flush_lag intervals
 --
 -- PG VERSION DIFFERENCES
 -- ----------------------
@@ -307,7 +353,11 @@ CREATE TABLE IF NOT EXISTS telemetry.snapshots (
     io_client_writes            BIGINT,
     io_client_write_time        DOUBLE PRECISION,
     io_bgwriter_writes          BIGINT,
-    io_bgwriter_write_time      DOUBLE PRECISION
+    io_bgwriter_write_time      DOUBLE PRECISION,
+
+    -- Temp file usage (pg_stat_database)
+    temp_files                  BIGINT,           -- cumulative temp files created
+    temp_bytes                  BIGINT            -- cumulative temp bytes written
 );
 
 CREATE INDEX IF NOT EXISTS snapshots_captured_at_idx ON telemetry.snapshots(captured_at);
@@ -355,6 +405,29 @@ CREATE TABLE IF NOT EXISTS telemetry.table_snapshots (
     analyze_count           BIGINT,
     autoanalyze_count       BIGINT,
     PRIMARY KEY (snapshot_id, relid)
+);
+
+-- -----------------------------------------------------------------------------
+-- Table: replication_snapshots - Per-replica stats captured with each snapshot
+-- -----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS telemetry.replication_snapshots (
+    snapshot_id             INTEGER REFERENCES telemetry.snapshots(id) ON DELETE CASCADE,
+    pid                     INTEGER NOT NULL,
+    client_addr             INET,
+    application_name        TEXT,
+    state                   TEXT,
+    sync_state              TEXT,
+    -- LSN positions
+    sent_lsn                PG_LSN,
+    write_lsn               PG_LSN,
+    flush_lsn               PG_LSN,
+    replay_lsn              PG_LSN,
+    -- Lag intervals (NULL if not available)
+    write_lag               INTERVAL,
+    flush_lag               INTERVAL,
+    replay_lag              INTERVAL,
+    PRIMARY KEY (snapshot_id, pid)
 );
 
 -- -----------------------------------------------------------------------------
@@ -711,6 +784,9 @@ DECLARE
     v_autovacuum_workers INTEGER;
     v_slots_count INTEGER;
     v_slots_max_retained BIGINT;
+    -- Temp file stats
+    v_temp_files BIGINT;
+    v_temp_bytes BIGINT;
     -- pg_stat_io values (PG16+)
     v_io_ckpt_writes BIGINT;
     v_io_ckpt_write_time DOUBLE PRECISION;
@@ -736,6 +812,12 @@ BEGIN
         COALESCE(max(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)), 0)
     INTO v_slots_count, v_slots_max_retained
     FROM pg_replication_slots;
+
+    -- Temp file stats (current database)
+    SELECT COALESCE(temp_files, 0), COALESCE(temp_bytes, 0)
+    INTO v_temp_files, v_temp_bytes
+    FROM pg_stat_database
+    WHERE datname = current_database();
 
     -- pg_stat_io (PG16+)
     IF v_pg_version >= 16 THEN
@@ -774,7 +856,8 @@ BEGIN
             io_checkpointer_writes, io_checkpointer_write_time, io_checkpointer_fsyncs, io_checkpointer_fsync_time,
             io_autovacuum_writes, io_autovacuum_write_time,
             io_client_writes, io_client_write_time,
-            io_bgwriter_writes, io_bgwriter_write_time
+            io_bgwriter_writes, io_bgwriter_write_time,
+            temp_files, temp_bytes
         )
         SELECT
             v_captured_at, v_pg_version,
@@ -788,7 +871,8 @@ BEGIN
             v_io_ckpt_writes, v_io_ckpt_write_time, v_io_ckpt_fsyncs, v_io_ckpt_fsync_time,
             v_io_av_writes, v_io_av_write_time,
             v_io_client_writes, v_io_client_write_time,
-            v_io_bgw_writes, v_io_bgw_write_time
+            v_io_bgw_writes, v_io_bgw_write_time,
+            v_temp_files, v_temp_bytes
         FROM pg_stat_wal w
         CROSS JOIN pg_stat_checkpointer c
         CROSS JOIN pg_stat_bgwriter b
@@ -807,7 +891,8 @@ BEGIN
             io_checkpointer_writes, io_checkpointer_write_time, io_checkpointer_fsyncs, io_checkpointer_fsync_time,
             io_autovacuum_writes, io_autovacuum_write_time,
             io_client_writes, io_client_write_time,
-            io_bgwriter_writes, io_bgwriter_write_time
+            io_bgwriter_writes, io_bgwriter_write_time,
+            temp_files, temp_bytes
         )
         SELECT
             v_captured_at, v_pg_version,
@@ -821,7 +906,8 @@ BEGIN
             v_io_ckpt_writes, v_io_ckpt_write_time, v_io_ckpt_fsyncs, v_io_ckpt_fsync_time,
             v_io_av_writes, v_io_av_write_time,
             v_io_client_writes, v_io_client_write_time,
-            v_io_bgw_writes, v_io_bgw_write_time
+            v_io_bgw_writes, v_io_bgw_write_time,
+            v_temp_files, v_temp_bytes
         FROM pg_stat_wal w
         CROSS JOIN pg_stat_bgwriter b
         RETURNING id INTO v_snapshot_id;
@@ -835,7 +921,8 @@ BEGIN
             ckpt_timed, ckpt_requested, ckpt_write_time, ckpt_sync_time, ckpt_buffers,
             bgw_buffers_clean, bgw_maxwritten_clean, bgw_buffers_alloc,
             bgw_buffers_backend, bgw_buffers_backend_fsync,
-            autovacuum_workers, slots_count, slots_max_retained_wal
+            autovacuum_workers, slots_count, slots_max_retained_wal,
+            temp_files, temp_bytes
         )
         SELECT
             v_captured_at, v_pg_version,
@@ -845,7 +932,8 @@ BEGIN
             b.checkpoints_timed, b.checkpoints_req, b.checkpoint_write_time, b.checkpoint_sync_time, b.buffers_checkpoint,
             b.buffers_clean, b.maxwritten_clean, b.buffers_alloc,
             b.buffers_backend, b.buffers_backend_fsync,
-            v_autovacuum_workers, v_slots_count, v_slots_max_retained
+            v_autovacuum_workers, v_slots_count, v_slots_max_retained,
+            v_temp_files, v_temp_bytes
         FROM pg_stat_wal w
         CROSS JOIN pg_stat_bgwriter b
         RETURNING id INTO v_snapshot_id;
@@ -886,6 +974,28 @@ BEGIN
         s.autoanalyze_count
     FROM telemetry.tracked_tables t
     JOIN pg_stat_user_tables s ON s.relid = t.relid;
+
+    -- Capture replication stats (if any replicas connected)
+    INSERT INTO telemetry.replication_snapshots (
+        snapshot_id, pid, client_addr, application_name, state, sync_state,
+        sent_lsn, write_lsn, flush_lsn, replay_lsn,
+        write_lag, flush_lag, replay_lag
+    )
+    SELECT
+        v_snapshot_id,
+        pid,
+        client_addr,
+        application_name,
+        state,
+        sync_state,
+        sent_lsn,
+        write_lsn,
+        flush_lsn,
+        replay_lsn,
+        write_lag,
+        flush_lag,
+        replay_lag
+    FROM pg_stat_replication;
 
     RETURN v_captured_at;
 END;
@@ -940,7 +1050,12 @@ SELECT
     s.io_client_writes - prev.io_client_writes AS io_client_writes_delta,
     (s.io_client_write_time - prev.io_client_write_time)::numeric AS io_client_write_time_ms,
     s.io_bgwriter_writes - prev.io_bgwriter_writes AS io_bgwriter_writes_delta,
-    (s.io_bgwriter_write_time - prev.io_bgwriter_write_time)::numeric AS io_bgwriter_write_time_ms
+    (s.io_bgwriter_write_time - prev.io_bgwriter_write_time)::numeric AS io_bgwriter_write_time_ms,
+
+    -- Temp file deltas
+    s.temp_files - prev.temp_files AS temp_files_delta,
+    s.temp_bytes - prev.temp_bytes AS temp_bytes_delta,
+    telemetry._pretty_bytes(s.temp_bytes - prev.temp_bytes) AS temp_bytes_pretty
 
 FROM telemetry.snapshots s
 JOIN telemetry.snapshots prev ON prev.id = (
@@ -993,7 +1108,12 @@ RETURNS TABLE(
     io_client_writes_delta        BIGINT,
     io_client_write_time_ms       NUMERIC,
     io_bgwriter_writes_delta      BIGINT,
-    io_bgwriter_write_time_ms     NUMERIC
+    io_bgwriter_write_time_ms     NUMERIC,
+
+    -- Temp file stats
+    temp_files_delta              BIGINT,
+    temp_bytes_delta              BIGINT,
+    temp_bytes_pretty             TEXT
 )
 LANGUAGE sql STABLE AS $$
     WITH
@@ -1044,7 +1164,11 @@ LANGUAGE sql STABLE AS $$
         e.io_client_writes - s.io_client_writes,
         (e.io_client_write_time - s.io_client_write_time)::numeric,
         e.io_bgwriter_writes - s.io_bgwriter_writes,
-        (e.io_bgwriter_write_time - s.io_bgwriter_write_time)::numeric
+        (e.io_bgwriter_write_time - s.io_bgwriter_write_time)::numeric,
+
+        e.temp_files - s.temp_files,
+        e.temp_bytes - s.temp_bytes,
+        telemetry._pretty_bytes(e.temp_bytes - s.temp_bytes)
     FROM start_snap s, end_snap e
 $$;
 
@@ -1184,6 +1308,33 @@ FROM telemetry.samples sm
 JOIN telemetry.progress_samples p ON p.sample_id = sm.id
 WHERE sm.captured_at > now() - interval '2 hours'
 ORDER BY sm.captured_at DESC, p.progress_type, p.relname;
+
+-- -----------------------------------------------------------------------------
+-- telemetry.recent_replication - View of replication lag from last 2 hours
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW telemetry.recent_replication AS
+SELECT
+    sn.captured_at,
+    r.pid,
+    r.client_addr,
+    r.application_name,
+    r.state,
+    r.sync_state,
+    r.sent_lsn,
+    r.write_lsn,
+    r.flush_lsn,
+    r.replay_lsn,
+    -- Calculate lag in bytes from current WAL position at snapshot time
+    pg_wal_lsn_diff(r.sent_lsn, r.replay_lsn)::bigint AS replay_lag_bytes,
+    telemetry._pretty_bytes(pg_wal_lsn_diff(r.sent_lsn, r.replay_lsn)::bigint) AS replay_lag_pretty,
+    r.write_lag,
+    r.flush_lag,
+    r.replay_lag
+FROM telemetry.snapshots sn
+JOIN telemetry.replication_snapshots r ON r.snapshot_id = sn.id
+WHERE sn.captured_at > now() - interval '2 hours'
+ORDER BY sn.captured_at DESC, r.application_name;
 
 -- -----------------------------------------------------------------------------
 -- telemetry.wait_summary() - Aggregate wait events over a time period
@@ -1336,7 +1487,7 @@ BEGIN
     )
     SELECT count(*) INTO v_deleted_samples FROM deleted;
 
-    -- Delete old snapshots (cascades to table_snapshots)
+    -- Delete old snapshots (cascades to table_snapshots, replication_snapshots)
     WITH deleted AS (
         DELETE FROM telemetry.snapshots WHERE captured_at < v_cutoff RETURNING 1
     )
@@ -1417,12 +1568,13 @@ BEGIN
     RAISE NOTICE '     SELECT * FROM telemetry.wait_summary(''2024-12-16 14:00'', ''2024-12-16 15:00'');';
     RAISE NOTICE '';
     RAISE NOTICE 'Views for recent activity:';
-    RAISE NOTICE '  - telemetry.deltas           (snapshot deltas)';
-    RAISE NOTICE '  - telemetry.table_deltas     (tracked table deltas)';
-    RAISE NOTICE '  - telemetry.recent_waits     (wait events, last 2 hours)';
-    RAISE NOTICE '  - telemetry.recent_activity  (active sessions, last 2 hours)';
-    RAISE NOTICE '  - telemetry.recent_locks     (lock contention, last 2 hours)';
-    RAISE NOTICE '  - telemetry.recent_progress  (vacuum/copy/analyze progress, last 2 hours)';
+    RAISE NOTICE '  - telemetry.deltas            (snapshot deltas incl. temp files)';
+    RAISE NOTICE '  - telemetry.table_deltas      (tracked table deltas)';
+    RAISE NOTICE '  - telemetry.recent_waits      (wait events, last 2 hours)';
+    RAISE NOTICE '  - telemetry.recent_activity   (active sessions, last 2 hours)';
+    RAISE NOTICE '  - telemetry.recent_locks      (lock contention, last 2 hours)';
+    RAISE NOTICE '  - telemetry.recent_progress   (vacuum/copy/analyze progress, last 2 hours)';
+    RAISE NOTICE '  - telemetry.recent_replication (replication lag, last 2 hours)';
     RAISE NOTICE '';
     RAISE NOTICE 'Table management:';
     RAISE NOTICE '  - telemetry.track_table(name, schema)';
