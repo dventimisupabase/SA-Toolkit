@@ -313,6 +313,8 @@ Example monitoring integration:
 
 ## Related Documents
 
+- [Tabletop Exercises](tabletop-exercises.md) - Detailed scenario scripts for discussion-based training
+- [Game Day Guide](game-day-guide.md) - Hands-on practice in sandbox environment
 - [Failover Runbook](failover-runbook.md)
 - [Failback Runbook](failback-runbook.md)
 - [Emergency Runbook](emergency-runbook.md)
