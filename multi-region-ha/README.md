@@ -22,11 +22,16 @@ This toolkit provides documentation, runbooks, and scripts for implementing a co
 
 ## Quick Start
 
-1. **Review prerequisites**: [docs/prerequisites.md](docs/prerequisites.md)
-2. **Understand the architecture**: [docs/architecture-overview.md](docs/architecture-overview.md)
-3. **Set up PgBouncer**: [docs/pgbouncer-flyio-setup.md](docs/pgbouncer-flyio-setup.md)
-4. **Configure replication**: [docs/logical-replication-setup.md](docs/logical-replication-setup.md)
-5. **Practice failover**: [runbooks/testing-runbook.md](runbooks/testing-runbook.md)
+**New projects:**
+1. [Review prerequisites](docs/prerequisites.md)
+2. [Understand the architecture](docs/architecture-overview.md)
+3. [Set up PgBouncer](docs/pgbouncer-flyio-setup.md)
+4. [Configure replication](docs/logical-replication-setup.md)
+5. [Practice failover](runbooks/testing-runbook.md)
+
+**Existing Supabase projects:** Start with the [Migration Guide](docs/migration-guide-existing-projects.md) for step-by-step instructions on adding HA to your existing database with minimal disruption.
+
+**Interactive visualization:** Open [visualization/index.html](visualization/index.html) in a browser to explore the architecture and failover process interactively.
 
 ## Directory Structure
 
@@ -40,7 +45,10 @@ multi-region-ha/
 │   ├── logical-replication-setup.md
 │   ├── supabase-schema-replication.md
 │   ├── storage-strategy.md
-│   └── sequence-synchronization.md
+│   ├── sequence-synchronization.md
+│   └── migration-guide-existing-projects.md
+├── visualization/            # Interactive architecture visualization
+│   └── index.html
 ├── runbooks/                 # Operational procedures
 │   ├── failover-runbook.md
 │   ├── failback-runbook.md
