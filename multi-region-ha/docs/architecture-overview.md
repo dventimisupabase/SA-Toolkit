@@ -147,6 +147,25 @@ Global control plane for routing:
 | Auth sessions invalidate | Simplifies failover vs. session replication |
 | Realtime state not replicated | Ephemeral nature makes replication impractical |
 
+## Limitations
+
+### No Physical Backup Access
+
+Supabase uses WAL-G internally for physical backups, but customers cannot access these backups directly. This has implications for standby initialization:
+
+| Requirement | Physical Backup Tools Need | Supabase Provides |
+|-------------|---------------------------|-------------------|
+| File system access | Direct access to `PGDATA` | Database access only |
+| WAL archiving control | `archive_command` configuration | Managed internally |
+| Server-side agent | Runs on PostgreSQL host | No SSH/shell access |
+
+**Consequence**: The standby must be initialized using logical methods:
+
+1. **Logical replication initial sync** (`copy_data=true`) - Used by this implementation
+2. **`pg_dump`/`pg_restore`** with `copy_data=false` - Alternative for more control
+
+For very large databases (hundreds of GB to TB scale), this means longer initial sync times compared to physical backup restoration. Plan accordingly when setting up DR for large datasets.
+
 ## Data Flow
 
 ### Normal Operation
