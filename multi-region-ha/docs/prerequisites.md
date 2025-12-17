@@ -60,14 +60,14 @@ flyctl auth login
 
 Review which schemas will be replicated:
 
-| Schema | Include in Publication | Notes |
-|--------|----------------------|-------|
-| `public` | Yes | Application data |
-| `auth` | Partial | `auth.users` only |
-| `storage` | Optional | Metadata tables only |
-| `realtime` | No | Ephemeral state |
-| `supabase_functions` | No | Function definitions, not data |
-| `extensions` | No | Extension state |
+| Schema               | Include in Publication | Notes                          |
+|----------------------|------------------------|--------------------------------|
+| `public`             | Yes                    | Application data               |
+| `auth`               | Partial                | `auth.users` only              |
+| `storage`            | Optional               | Metadata tables only           |
+| `realtime`           | No                     | Ephemeral state                |
+| `supabase_functions` | No                     | Function definitions, not data |
+| `extensions`         | No                     | Extension state                |
 
 ### Sequences
 

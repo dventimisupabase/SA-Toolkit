@@ -4,14 +4,14 @@ A Game Day is a scheduled, hands-on exercise where your team practices DR proced
 
 ## What is a Game Day?
 
-| Aspect | Tabletop | Game Day | Production DR Test |
-|--------|----------|----------|-------------------|
-| Systems touched | None | Sandbox/Staging | Production |
-| Risk level | Zero | Low | Medium-High |
-| Realism | Moderate | High | Highest |
-| Frequency | Monthly | Quarterly | Quarterly |
-| Duration | 1-2 hours | Half day | 2-4 hours |
-| Team size | 3-6 | 5-15 | 3-6 |
+| Aspect          | Tabletop  | Game Day        | Production DR Test |
+|-----------------|-----------|-----------------|--------------------|
+| Systems touched | None      | Sandbox/Staging | Production         |
+| Risk level      | Zero      | Low             | Medium-High        |
+| Realism         | Moderate  | High            | Highest            |
+| Frequency       | Monthly   | Quarterly       | Quarterly          |
+| Duration        | 1-2 hours | Half day        | 2-4 hours          |
+| Team size       | 3-6       | 5-15            | 3-6                |
 
 **Game Day philosophy**: Make it real enough to learn, safe enough to fail.
 
@@ -40,14 +40,14 @@ Your Application               →    Sandbox App Instance
 
 ### Team Roles
 
-| Role | Responsibility | Who |
-|------|----------------|-----|
-| **Game Master** | Runs the exercise, injects failures, keeps time | Senior engineer or SRE lead |
-| **Incident Commander** | Makes decisions, coordinates response | On-call rotation member |
-| **Primary Responder** | Executes procedures, runs commands | Engineer being trained |
-| **Secondary Responder** | Assists, provides backup, watches for errors | Buddy/shadow |
-| **Observer(s)** | Takes notes, tracks metrics, no direct participation | Anyone learning |
-| **Stakeholder** (optional) | Practices communication, asks questions | Manager or product person |
+| Role                       | Responsibility                                       | Who                         |
+|----------------------------|------------------------------------------------------|-----------------------------|
+| **Game Master**            | Runs the exercise, injects failures, keeps time      | Senior engineer or SRE lead |
+| **Incident Commander**     | Makes decisions, coordinates response                | On-call rotation member     |
+| **Primary Responder**      | Executes procedures, runs commands                   | Engineer being trained      |
+| **Secondary Responder**    | Assists, provides backup, watches for errors         | Buddy/shadow                |
+| **Observer(s)**            | Takes notes, tracks metrics, no direct participation | Anyone learning             |
+| **Stakeholder** (optional) | Practices communication, asks questions              | Manager or product person   |
 
 ### Materials
 
@@ -221,15 +221,15 @@ curl https://sandbox-app.example.com/health
 
 The Game Master secretly plans 2-3 "chaos events" to inject during the exercise:
 
-| Chaos Event | When to Inject | How to Simulate |
-|-------------|----------------|-----------------|
-| PgBouncer unresponsive | During pause step | `fly scale count 0` |
-| Wrong password in runbook | During promotion | Change password, don't tell team |
-| Standby also "failing" | After primary fails | Tell team "standby showing errors" |
-| Slack goes down | Mid-incident | "Slack is unreachable, use backup channel" |
-| Key person "unavailable" | During execution | Primary responder must hand off |
-| Rollback required | After failover | "Critical bug found, roll back!" |
-| Executive joins call | During recovery | Have stakeholder start asking questions |
+| Chaos Event               | When to Inject      | How to Simulate                            |
+|---------------------------|---------------------|--------------------------------------------|
+| PgBouncer unresponsive    | During pause step   | `fly scale count 0`                        |
+| Wrong password in runbook | During promotion    | Change password, don't tell team           |
+| Standby also "failing"    | After primary fails | Tell team "standby showing errors"         |
+| Slack goes down           | Mid-incident        | "Slack is unreachable, use backup channel" |
+| Key person "unavailable"  | During execution    | Primary responder must hand off            |
+| Rollback required         | After failover      | "Critical bug found, roll back!"           |
+| Executive joins call      | During recovery     | Have stakeholder start asking questions    |
 
 #### Running Chaos Scenario
 
@@ -253,18 +253,18 @@ The Game Master secretly plans 2-3 "chaos events" to inject during the exercise:
 
 #### Schedule
 
-| Time | Activity | Primary Responder |
-|------|----------|-------------------|
-| 0:00 | Setup, briefing | - |
-| 0:30 | Round 1: Standard failover | Person A |
-| 1:15 | Round 1 debrief | - |
-| 1:30 | Round 2: Failover with chaos | Person B |
-| 2:15 | Round 2 debrief | - |
-| 2:30 | Break | - |
-| 2:45 | Round 3: Emergency failover | Person C |
-| 3:15 | Round 3 debrief | - |
-| 3:30 | Round 4: Communication focus | Person D |
-| 4:00 | Final debrief, action items | - |
+| Time | Activity                     | Primary Responder |
+|------|------------------------------|-------------------|
+| 0:00 | Setup, briefing              | -                 |
+| 0:30 | Round 1: Standard failover   | Person A          |
+| 1:15 | Round 1 debrief              | -                 |
+| 1:30 | Round 2: Failover with chaos | Person B          |
+| 2:15 | Round 2 debrief              | -                 |
+| 2:30 | Break                        | -                 |
+| 2:45 | Round 3: Emergency failover  | Person C          |
+| 3:15 | Round 3 debrief              | -                 |
+| 3:30 | Round 4: Communication focus | Person D          |
+| 4:00 | Final debrief, action items  | -                 |
 
 #### Between Rounds
 
@@ -504,13 +504,13 @@ echo "=== Environment Reset Complete ==="
 
 Track for each participant:
 
-| Metric | Target | Scoring |
-|--------|--------|---------|
-| Failover time | < 5 min | 3 pts if < 5, 2 pts if < 10, 1 pt if < 15 |
-| Commands correct first try | > 80% | 1 pt per 10% above 80 |
-| Runbook references | Used appropriately | 2 pts if referenced, 0 if guessed |
-| Communication clarity | Clear updates | Subjective 1-3 pts |
-| Error recovery | Handled gracefully | 2 pts if recovered without help |
+| Metric                     | Target             | Scoring                                   |
+|----------------------------|--------------------|-------------------------------------------|
+| Failover time              | < 5 min            | 3 pts if < 5, 2 pts if < 10, 1 pt if < 15 |
+| Commands correct first try | > 80%              | 1 pt per 10% above 80                     |
+| Runbook references         | Used appropriately | 2 pts if referenced, 0 if guessed         |
+| Communication clarity      | Clear updates      | Subjective 1-3 pts                        |
+| Error recovery             | Handled gracefully | 2 pts if recovered without help           |
 
 ### Team Metrics
 
@@ -567,20 +567,20 @@ Track across all Game Days:
 
 ## Sample Annual Game Day Calendar
 
-| Quarter | Month | Scenario | Focus |
-|---------|-------|----------|-------|
-| Q1 | January | Standard Failover | Baseline |
-| Q1 | February | New Hire Cert | [Name] |
-| Q1 | March | Chaos Engineering | Adaptability |
-| Q2 | April | Full Team Rotation | Coverage |
-| Q2 | May | New Hire Cert | [Name] |
-| Q2 | June | Communication Focus | Stakeholders |
-| Q3 | July | Standard Failover | Refresh |
-| Q3 | August | Production DR Test | Real systems |
-| Q3 | September | Chaos Engineering | Advanced |
-| Q4 | October | Full Team Rotation | Coverage |
-| Q4 | November | Emergency Scenario | Speed |
-| Q4 | December | Annual Review | Retrospective |
+| Quarter | Month     | Scenario            | Focus         |
+|---------|-----------|---------------------|---------------|
+| Q1      | January   | Standard Failover   | Baseline      |
+| Q1      | February  | New Hire Cert       | [Name]        |
+| Q1      | March     | Chaos Engineering   | Adaptability  |
+| Q2      | April     | Full Team Rotation  | Coverage      |
+| Q2      | May       | New Hire Cert       | [Name]        |
+| Q2      | June      | Communication Focus | Stakeholders  |
+| Q3      | July      | Standard Failover   | Refresh       |
+| Q3      | August    | Production DR Test  | Real systems  |
+| Q3      | September | Chaos Engineering   | Advanced      |
+| Q4      | October   | Full Team Rotation  | Coverage      |
+| Q4      | November  | Emergency Scenario  | Speed         |
+| Q4      | December  | Annual Review       | Retrospective |
 
 ---
 

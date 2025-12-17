@@ -98,10 +98,10 @@ Full procedure: [runbooks/failover-runbook.md](runbooks/failover-runbook.md)
 
 ## RTO/RPO
 
-| Metric | Target |
-|--------|--------|
-| RPO | Seconds to minutes (replication lag dependent) |
-| RTO | 2-5 minutes (scripted) / 5-15 minutes (manual) |
+| Metric | Target                                         |
+|--------|------------------------------------------------|
+| RPO    | Seconds to minutes (replication lag dependent) |
+| RTO    | 2-5 minutes (scripted) / 5-15 minutes (manual) |
 
 ## Requirements
 

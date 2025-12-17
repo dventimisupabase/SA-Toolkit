@@ -13,13 +13,13 @@ The main work involves:
 
 ## Impact Summary
 
-| Component | Change Required | Downtime |
-|-----------|-----------------|----------|
-| Primary Database | 2 SQL statements | None |
-| Primary Application Code | None | None |
-| Standby Database | New Supabase project | N/A |
-| PgBouncer | New Fly.io deployment | N/A |
-| Application Config | Connection string update | Brief (during deploy) |
+| Component                | Change Required          | Downtime              |
+|--------------------------|--------------------------|-----------------------|
+| Primary Database         | 2 SQL statements         | None                  |
+| Primary Application Code | None                     | None                  |
+| Standby Database         | New Supabase project     | N/A                   |
+| PgBouncer                | New Fly.io deployment    | N/A                   |
+| Application Config       | Connection string update | Brief (during deploy) |
 
 ## Prerequisites
 
@@ -52,13 +52,13 @@ LIMIT 20;
 ```
 
 | Database Size | Expected Initial Sync |
-|---------------|----------------------|
-| < 1 GB | 5-15 minutes |
-| 1-10 GB | 15-60 minutes |
-| 10-50 GB | 1-4 hours |
-| 50-200 GB | 4-12 hours |
-| 200 GB - 1 TB | 12-48 hours |
-| > 1 TB | Multiple days |
+|---------------|-----------------------|
+| < 1 GB        | 5-15 minutes          |
+| 1-10 GB       | 15-60 minutes         |
+| 10-50 GB      | 1-4 hours             |
+| 50-200 GB     | 4-12 hours            |
+| 200 GB - 1 TB | 12-48 hours           |
+| > 1 TB        | Multiple days         |
 
 ### Step 1.2: Verify Table Requirements
 
@@ -425,23 +425,23 @@ If too large:
 
 Common issues:
 
-| Error | Cause | Solution |
-|-------|-------|----------|
+| Error                        | Cause            | Solution                                                 |
+|------------------------------|------------------|----------------------------------------------------------|
 | Prepared statement not found | Transaction mode | Use `pool_mode = session` or disable prepared statements |
-| Temp table doesn't exist | Transaction mode | Expected behavior; redesign if needed |
-| Advisory lock released | Transaction mode | Use `pool_mode = session` |
+| Temp table doesn't exist     | Transaction mode | Expected behavior; redesign if needed                    |
+| Advisory lock released       | Transaction mode | Use `pool_mode = session`                                |
 
 ## Timeline Example
 
-| Day | Activity | Duration |
-|-----|----------|----------|
-| 1 | Create standby project, sync schema | 1-2 hours |
-| 1 | Create publication, slot, subscription | 30 minutes |
-| 1-3 | Initial data sync (depends on size) | Hours to days |
-| 3 | Deploy PgBouncer, test | 2-3 hours |
-| 4 | Application cutover (staging) | 1 hour |
-| 5 | Application cutover (production) | 1 hour |
-| 5+ | Monitor, test failover | Ongoing |
+| Day | Activity                               | Duration      |
+|-----|----------------------------------------|---------------|
+| 1   | Create standby project, sync schema    | 1-2 hours     |
+| 1   | Create publication, slot, subscription | 30 minutes    |
+| 1-3 | Initial data sync (depends on size)    | Hours to days |
+| 3   | Deploy PgBouncer, test                 | 2-3 hours     |
+| 4   | Application cutover (staging)          | 1 hour        |
+| 5   | Application cutover (production)       | 1 hour        |
+| 5+  | Monitor, test failover                 | Ongoing       |
 
 ## Checklist
 

@@ -12,12 +12,12 @@ Regular DR testing ensures:
 
 ## Recommended Testing Cadence
 
-| Test Type | Frequency | Duration |
-|-----------|-----------|----------|
-| Health check verification | Weekly | 15 min |
-| Replication lag monitoring | Daily (automated) | - |
-| Tabletop exercise | Monthly | 1 hour |
-| Full failover test | Quarterly | 2-4 hours |
+| Test Type                  | Frequency         | Duration  |
+|----------------------------|-------------------|-----------|
+| Health check verification  | Weekly            | 15 min    |
+| Replication lag monitoring | Daily (automated) | -         |
+| Tabletop exercise          | Monthly           | 1 hour    |
+| Full failover test         | Quarterly         | 2-4 hours |
 
 ## Pre-Test Checklist
 

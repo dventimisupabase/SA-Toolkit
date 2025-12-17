@@ -11,12 +11,12 @@ This runbook is for emergency failover when the primary is completely unreachabl
 
 ## Key Differences from Standard Failover
 
-| Step | Standard | Emergency |
-|------|----------|-----------|
-| Freeze primary | Yes | **Skip** (unreachable) |
-| Sequence sync | From primary | **Skip or estimate** |
-| Data loss | Minimal | **Possible** |
-| Recovery time | Longer | **Faster** |
+| Step           | Standard     | Emergency              |
+|----------------|--------------|------------------------|
+| Freeze primary | Yes          | **Skip** (unreachable) |
+| Sequence sync  | From primary | **Skip or estimate**   |
+| Data loss      | Minimal      | **Possible**           |
+| Recovery time  | Longer       | **Faster**             |
 
 ## Immediate Actions
 
@@ -226,15 +226,15 @@ Post-incident review scheduled for [date].
 
 ## Metrics to Record
 
-| Metric | Value |
-|--------|-------|
-| Incident start time | |
-| Primary declared unreachable | |
-| Failover initiated | |
-| Failover completed | |
-| Total RTO | |
-| Last replication timestamp | |
-| Estimated data loss window | |
+| Metric                       | Value |
+|------------------------------|-------|
+| Incident start time          |       |
+| Primary declared unreachable |       |
+| Failover initiated           |       |
+| Failover completed           |       |
+| Total RTO                    |       |
+| Last replication timestamp   |       |
+| Estimated data loss window   |       |
 
 ## When to Escalate
 

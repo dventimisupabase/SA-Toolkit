@@ -4,17 +4,17 @@ Supabase projects include several system schemas beyond your application's `publ
 
 ## Schema Overview
 
-| Schema | Purpose | Replicate? | Notes |
-|--------|---------|------------|-------|
-| `public` | Application data | **Yes** | All user tables |
-| `auth` | Authentication | **Partial** | Users yes, sessions no |
-| `storage` | File metadata | **Optional** | If using Supabase Storage |
-| `realtime` | Realtime state | **No** | Ephemeral |
-| `supabase_functions` | Edge Functions | **No** | Code, not data |
-| `extensions` | Extension data | **No** | Generally not needed |
-| `graphql` | GraphQL cache | **No** | Ephemeral |
-| `vault` | Secrets | **No** | Security concern |
-| `pgsodium` | Encryption | **No** | Security concern |
+| Schema               | Purpose          | Replicate?   | Notes                     |
+|----------------------|------------------|--------------|---------------------------|
+| `public`             | Application data | **Yes**      | All user tables           |
+| `auth`               | Authentication   | **Partial**  | Users yes, sessions no    |
+| `storage`            | File metadata    | **Optional** | If using Supabase Storage |
+| `realtime`           | Realtime state   | **No**       | Ephemeral                 |
+| `supabase_functions` | Edge Functions   | **No**       | Code, not data            |
+| `extensions`         | Extension data   | **No**       | Generally not needed      |
+| `graphql`            | GraphQL cache    | **No**       | Ephemeral                 |
+| `vault`              | Secrets          | **No**       | Security concern          |
+| `pgsodium`           | Encryption       | **No**       | Security concern          |
 
 ## Public Schema
 
@@ -44,23 +44,23 @@ CREATE PUBLICATION dr_publication FOR TABLE
 
 ### Tables in `auth` Schema
 
-| Table | Replicate? | Rationale |
-|-------|------------|-----------|
-| `auth.users` | **Yes** | Core user data, emails, metadata |
-| `auth.identities` | **Yes** | OAuth identities |
-| `auth.sessions` | No | Ephemeral, users re-auth after failover |
-| `auth.refresh_tokens` | No | Ephemeral, regenerated on login |
-| `auth.mfa_factors` | **Yes** | MFA configuration |
-| `auth.mfa_challenges` | No | Ephemeral |
-| `auth.mfa_amr_claims` | No | Ephemeral |
-| `auth.flow_state` | No | Ephemeral OAuth flow state |
-| `auth.saml_providers` | **Yes** | SAML configuration |
-| `auth.saml_relay_states` | No | Ephemeral |
-| `auth.sso_providers` | **Yes** | SSO configuration |
-| `auth.sso_domains` | **Yes** | SSO domain mapping |
-| `auth.audit_log_entries` | Optional | Audit trail |
-| `auth.instances` | No | Instance metadata |
-| `auth.schema_migrations` | No | Migration history |
+| Table                    | Replicate? | Rationale                               |
+|--------------------------|------------|-----------------------------------------|
+| `auth.users`             | **Yes**    | Core user data, emails, metadata        |
+| `auth.identities`        | **Yes**    | OAuth identities                        |
+| `auth.sessions`          | No         | Ephemeral, users re-auth after failover |
+| `auth.refresh_tokens`    | No         | Ephemeral, regenerated on login         |
+| `auth.mfa_factors`       | **Yes**    | MFA configuration                       |
+| `auth.mfa_challenges`    | No         | Ephemeral                               |
+| `auth.mfa_amr_claims`    | No         | Ephemeral                               |
+| `auth.flow_state`        | No         | Ephemeral OAuth flow state              |
+| `auth.saml_providers`    | **Yes**    | SAML configuration                      |
+| `auth.saml_relay_states` | No         | Ephemeral                               |
+| `auth.sso_providers`     | **Yes**    | SSO configuration                       |
+| `auth.sso_domains`       | **Yes**    | SSO domain mapping                      |
+| `auth.audit_log_entries` | Optional   | Audit trail                             |
+| `auth.instances`         | No         | Instance metadata                       |
+| `auth.schema_migrations` | No         | Migration history                       |
 
 ### Recommended Auth Replication
 
@@ -97,11 +97,11 @@ supabase.auth.onAuthStateChange((event, session) => {
 
 ### Tables in `storage` Schema
 
-| Table | Replicate? | Rationale |
-|-------|------------|-----------|
-| `storage.buckets` | **Yes** | Bucket configuration |
-| `storage.objects` | **Yes** | File metadata |
-| `storage.migrations` | No | Migration history |
+| Table                | Replicate? | Rationale            |
+|----------------------|------------|----------------------|
+| `storage.buckets`    | **Yes**    | Bucket configuration |
+| `storage.objects`    | **Yes**    | File metadata        |
+| `storage.migrations` | No         | Migration history    |
 
 ### Important: Files vs Metadata
 

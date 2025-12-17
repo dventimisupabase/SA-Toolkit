@@ -243,13 +243,13 @@ This ensures:
 
 ## Comparison Table
 
-| Approach | File Availability After Failover | Complexity | Cost |
-|----------|----------------------------------|------------|------|
-| External Storage (S3 CRR) | Immediate | Medium | Higher |
-| External Storage (R2) | Immediate | Low | Lower |
-| Supabase + Dual-Write | Immediate | High | Higher |
-| Supabase + Post-Failover Sync | Delayed | Medium | Same |
-| Accept Unavailability | Delayed/Manual | Low | Same |
+| Approach                      | File Availability After Failover | Complexity | Cost   |
+|-------------------------------|----------------------------------|------------|--------|
+| External Storage (S3 CRR)     | Immediate                        | Medium     | Higher |
+| External Storage (R2)         | Immediate                        | Low        | Lower  |
+| Supabase + Dual-Write         | Immediate                        | High       | Higher |
+| Supabase + Post-Failover Sync | Delayed                          | Medium     | Same   |
+| Accept Unavailability         | Delayed/Manual                   | Low        | Same   |
 
 ## Recommendation
 
