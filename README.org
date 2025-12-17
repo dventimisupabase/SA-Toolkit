@@ -4,8 +4,8 @@
 #+options: d:(not "LOGBOOK") date:t e:t email:nil expand-links:t f:t
 #+options: inline:t num:t p:nil pri:nil prop:nil stat:t tags:t
 #+options: tasks:t tex:t timestamp:t title:t toc:t todo:t |:t
-#+title: README
-#+date: <2025-12-15 Mon>
+#+title: SA-Toolkit
+#+date: <2025-12-16 Mon>
 #+author: David A. Ventimiglia
 #+email: david.ventimiglia@supabase.io
 #+language: en
@@ -18,146 +18,163 @@
 
 * What
 
-This is a Solutions Architect Toolkit.
+This is a Solutions Architect Toolkit—a collection of tools for PostgreSQL diagnostics and troubleshooting.
 
 * Why
 
-* How
-
-This comprises a loose assortment of tools, scripts, programs, etc., that are useful to a Solutions Architect, especially one supporting PostgreSQL database products.
+When batch jobs exhibit variance (e.g., usually 10 minutes but sometimes 60 minutes), you need telemetry to answer: "Why did this batch take so long?"
 
 * Tools
 
-** batch-telemetry/batch_telemetry.sh
+** batch-telemetry/sql/
 
-Client-side batch telemetry for PostgreSQL 15, 16, or 17. Captures before/after snapshots of database statistics to diagnose checkpoint pressure, WAL volume, autovacuum interference, and I/O bottlenecks during batch workloads—without writing anything to the database.
+Server-side batch telemetry for PostgreSQL 15, 16, or 17. Automatically collects performance metrics via ~pg_cron~ to diagnose batch job variance.
 
 *** Requirements
 
-- bash
-- psql
-- jq
+- PostgreSQL 15, 16, or 17
+- ~pg_cron~ extension (1.4.1+ recommended for 30-second sampling)
 
-*** Authentication
-
-Uses standard libpq environment variables (~PGHOST~, ~PGPORT~, ~PGUSER~, ~PGDATABASE~, ~PGPASSWORD~) or =.pgpass=. PostgreSQL version is auto-detected from the connected database.
-
-*** Basic Usage
+*** Installation
 
 #+begin_src bash
-./batch-telemetry/batch_telemetry.sh start  batch_1 "10M row import"
-./batch-telemetry/batch_telemetry.sh sample batch_1
-./batch-telemetry/batch_telemetry.sh end    batch_1
-./batch-telemetry/batch_telemetry.sh report batch_1
+psql -f batch-telemetry/sql/install.sql
 #+end_src
 
-*** Commands
-
-| Command  | Description                                                                 |
-|----------+-----------------------------------------------------------------------------|
-| ~start~  | Capture baseline state (settings, WAL, bgwriter/checkpointer, slots, I/O)   |
-| ~sample~ | Point-in-time snapshot (wait events, active sessions, vacuum/COPY progress) |
-| ~end~    | Capture end state                                                           |
-| ~report~ | Generate summary report with deltas and interpretation guide                |
-
-*** Options
-
-| Option           | Description                                                  |
-|------------------+--------------------------------------------------------------|
-| ~--table <name>~ | Track table-specific stats (size, tuples, autovacuum events) |
-
-*** State Files
-
-All state is stored locally in =.telemetry/<batch_id>.json= and =.telemetry/<batch_id>.samples=.
-
-*** Diagnosing Variance in Batch Insert Performance
-
-When batch insert jobs exhibit variance (e.g., usually completing in 10 minutes but sometimes taking 40-60 minutes), this script helps identify the cause by comparing metrics between fast and slow runs.
-
-**** Instrumentation Strategy
-
-Wrap every batch job to capture telemetry on both fast and slow runs:
+*** Uninstall
 
 #+begin_src bash
-BATCH_ID="batch_$(date +%Y%m%d_%H%M%S)"
-TABLE_NAME="target_table"
-
-# Start telemetry
-./batch-telemetry/batch_telemetry.sh --table "$TABLE_NAME" start "$BATCH_ID" "10M row insert"
-
-# Run the batch insert job
-# <your insert command here>
-
-# End telemetry and generate report
-./batch-telemetry/batch_telemetry.sh end "$BATCH_ID"
-./batch-telemetry/batch_telemetry.sh report "$BATCH_ID" > "${BATCH_ID}_report.txt"
+psql -f batch-telemetry/sql/uninstall.sql
 #+end_src
 
-**** Sampling During Long-Running Jobs
+*** Quick Start
 
-For jobs that may run 10+ minutes, capture periodic samples to see what's happening during execution:
+#+begin_src sql
+-- 1. Track your target table(s) before running the batch
+SELECT telemetry.track_table('orders');
 
-#+begin_src bash
-# In a separate terminal, sample every 60 seconds while the job runs
-while true; do
-  ./batch-telemetry/batch_telemetry.sh sample "$BATCH_ID"
-  sleep 60
-done
+-- 2. Run your batch job, note the start/end times
+--    (telemetry collects automatically in the background)
+
+-- 3. Analyze the batch window
+SELECT * FROM telemetry.compare('2024-12-16 14:00', '2024-12-16 15:00');
+SELECT * FROM telemetry.table_compare('orders', '2024-12-16 14:00', '2024-12-16 15:00');
+SELECT * FROM telemetry.wait_summary('2024-12-16 14:00', '2024-12-16 15:00');
 #+end_src
 
-Samples are appended to =.telemetry/<batch_id>.samples= and capture:
-- Active sessions and wait events
-- Vacuum progress (~pg_stat_progress_vacuum~)
-- COPY progress (~pg_stat_progress_copy~)
-- I/O by backend type (~pg_stat_io~, PG16+)
+*** Two-Tier Collection
 
-**** Comparing Fast vs Slow Runs
+Telemetry runs automatically via ~pg_cron~:
 
-Collect reports from multiple runs and compare these key metrics:
+| Tier      | Interval   | What's Captured                                          |
+|-----------+------------+----------------------------------------------------------|
+| Snapshots | 5 minutes  | WAL, checkpoints, bgwriter, replication, temp files, I/O |
+| Samples   | 30 seconds | Wait events, active sessions, locks, operation progress  |
 
-| Metric                         | Fast Run Baseline | Slow Run Indicates                              |
-|--------------------------------+-------------------+-------------------------------------------------|
-| ~checkpoints_req_delta~        | 0                 | >0: Forced checkpoints (WAL exceeded max_wal_size) |
-| ~autovacuum_count_delta~       | 0                 | >0: Autovacuum ran on target table mid-batch    |
-| ~checkpoint_write_time_ms_delta~ | Low             | High: Checkpoint I/O storm                      |
-| ~checkpoint_sync_time_ms_delta~  | Low             | High: Storage fsync bottleneck                  |
-| ~buffers_backend_delta~        | 0 or low          | High: shared_buffers exhaustion                 |
-| ~buffers_backend_fsync_delta~  | 0                 | >0: Backends doing fsync (severe)               |
-| ~wal_sync_time_ms_delta~       | Proportional      | Disproportionately high: WAL storage bottleneck |
+*** Key Functions
 
-**** Common Causes of Variance
+| Function                                    | Purpose                                   |
+|---------------------------------------------+-------------------------------------------|
+| ~telemetry.track_table(name, schema)~       | Register a table for monitoring           |
+| ~telemetry.compare(start, end)~             | Compare system stats between time points  |
+| ~telemetry.table_compare(table, start, end)~ | Compare table stats between time points   |
+| ~telemetry.wait_summary(start, end)~        | Aggregate wait events over a time period  |
+| ~telemetry.cleanup(interval)~               | Remove old data (default: retain 7 days)  |
 
-***** Autovacuum Interference
+*** Key Views
 
-If ~autovacuum_count_delta > 0~ on slow runs, autovacuum is vacuuming or analyzing the target table mid-batch, competing for I/O and potentially holding locks.
+| View                          | Purpose                                    |
+|-------------------------------+--------------------------------------------|
+| ~telemetry.deltas~            | Snapshot deltas (checkpoint, WAL, buffers) |
+| ~telemetry.table_deltas~      | Per-table deltas (size, tuples, vacuum)    |
+| ~telemetry.recent_locks~      | Lock contention (last 2 hours)             |
+| ~telemetry.recent_waits~      | Wait events (last 2 hours)                 |
+| ~telemetry.recent_progress~   | Vacuum/COPY/analyze progress (last 2 hours)|
+| ~telemetry.recent_replication~| Replication lag (last 2 hours)             |
 
-Evidence in samples: ~pg_stat_progress_vacuum~ entries for the target table.
+*** Diagnostic Patterns
 
-Mitigation: Adjust autovacuum thresholds for the table, or temporarily disable autovacuum during batch windows.
+**** Pattern 1: Lock Contention
 
-***** Forced Checkpoints
+Symptoms:
+- Batch takes 10x longer than expected
+- ~telemetry.recent_locks~ shows ~blocked_pid~ entries
 
-If ~checkpoints_req_delta > 0~ on slow runs but not fast ones, the batch is generating enough WAL to exceed ~max_wal_size~, triggering checkpoint storms.
+#+begin_src sql
+SELECT * FROM telemetry.recent_locks
+WHERE captured_at BETWEEN '2024-12-16 14:00' AND '2024-12-16 15:00';
+#+end_src
 
-Evidence: High ~checkpoint_write_time_ms_delta~ and ~checkpoint_sync_time_ms_delta~.
+**** Pattern 2: Buffer Pressure
 
-Mitigation: Increase ~max_wal_size~, or spread the batch over time.
+Symptoms:
+- ~bgw_buffers_backend_delta > 0~ (backends writing directly)
+- Wait events: ~LWLock:WALWrite~, ~Lock:extend~
 
-***** Shared Buffers Exhaustion
+#+begin_src sql
+SELECT bgw_buffers_backend_delta, wal_bytes_pretty
+FROM telemetry.compare('2024-12-16 14:00', '2024-12-16 15:00');
+#+end_src
 
-If ~buffers_backend_delta~ is high on slow runs, backends are writing dirty buffers directly instead of letting the background writer handle it.
+**** Pattern 3: Checkpoint Interference
 
-Evidence: ~buffers_backend_fsync_delta > 0~ is especially severe.
+Symptoms:
+- ~checkpoint_occurred = true~ during batch
+- High ~ckpt_write_time_ms~
 
-Mitigation: Increase ~shared_buffers~, tune ~bgwriter_lru_maxpages~ and ~bgwriter_lru_multiplier~.
+**** Pattern 4: Autovacuum Interference
 
-***** Concurrent Workload
+Symptoms:
+- ~table_compare()~ shows ~autovacuum_ran = true~
+- ~recent_progress~ shows vacuum overlapping batch
 
-Samples capture active sessions and wait events. Compare samples between fast and slow runs to identify:
-- Lock contention (~wait_event_type = Lock~)
-- I/O waits (~wait_event_type = IO~)
-- Other queries competing for resources
+**** Pattern 5: Temp File Spills
 
-***** Replication Slot Lag
+Symptoms:
+- ~temp_files_delta > 0~
+- Large ~temp_bytes_delta~ (work_mem exhaustion)
 
-The report includes ~slots_start~ and ~slots_end~ with ~retained_wal_bytes~. Large retained WAL from inactive or slow slots can prevent WAL recycling and impact performance.
+Resolution: Increase ~work_mem~ for the session.
+
+**** Pattern 6: Replication Lag
+
+Symptoms:
+- ~recent_replication~ shows large ~replay_lag_bytes~
+- Batch runs slowly despite no local contention
+
+Resolution: Check replica health or switch to async replication.
+
+*** Quick Diagnosis Checklist
+
+For a slow batch between ~START~ and ~END~:
+
+#+begin_src sql
+-- 1. Overall health
+SELECT * FROM telemetry.compare('START', 'END');
+
+-- 2. Lock contention
+SELECT * FROM telemetry.recent_locks
+WHERE captured_at BETWEEN 'START' AND 'END';
+
+-- 3. Wait events
+SELECT * FROM telemetry.wait_summary('START', 'END');
+
+-- 4. Table-specific (if tracking)
+SELECT * FROM telemetry.table_compare('mytable', 'START', 'END');
+
+-- 5. Active operations
+SELECT * FROM telemetry.recent_progress
+WHERE captured_at BETWEEN 'START' AND 'END';
+
+-- 6. Replication lag
+SELECT * FROM telemetry.recent_replication
+WHERE captured_at BETWEEN 'START' AND 'END';
+#+end_src
+
+*** PG Version Differences
+
+| Version | Checkpoint Stats         | pg_stat_io |
+|---------+--------------------------+------------|
+| PG 15   | ~pg_stat_bgwriter~       | No         |
+| PG 16   | ~pg_stat_bgwriter~       | Yes        |
+| PG 17   | ~pg_stat_checkpointer~   | Yes        |
