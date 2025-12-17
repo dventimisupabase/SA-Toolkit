@@ -209,12 +209,12 @@ WHERE slot_name = 'dr_slot';
 
 ### Alerting Thresholds
 
-| Lag | Status | Action |
-|-----|--------|--------|
-| < 1 MB | Healthy | None |
-| 1-10 MB | Warning | Monitor |
-| 10-100 MB | Critical | Investigate |
-| > 100 MB | Emergency | May need to recreate subscription |
+| Lag       | Status    | Action                            |
+|-----------|-----------|-----------------------------------|
+| < 1 MB    | Healthy   | None                              |
+| 1-10 MB   | Warning   | Monitor                           |
+| 10-100 MB | Critical  | Investigate                       |
+| > 100 MB  | Emergency | May need to recreate subscription |
 
 ## Handling Schema Changes (DDL)
 

@@ -258,15 +258,15 @@ For duplicate key errors, either:
 
 ## Timeline Example
 
-| Time | Action |
-|------|--------|
-| T+0 | Announce maintenance window |
-| T+5m | Verify old primary health |
-| T+10m | Begin reverse replication setup |
-| T+30m | Monitor replication catch-up |
-| T+60m | Verify data consistency |
-| T+70m | Execute failover |
-| T+75m | Verify operations |
+| Time  | Action                           |
+|-------|----------------------------------|
+| T+0   | Announce maintenance window      |
+| T+5m  | Verify old primary health        |
+| T+10m | Begin reverse replication setup  |
+| T+30m | Monitor replication catch-up     |
+| T+60m | Verify data consistency          |
+| T+70m | Execute failover                 |
+| T+75m | Verify operations                |
 | T+90m | Complete and notify stakeholders |
 
 ## Related Documents

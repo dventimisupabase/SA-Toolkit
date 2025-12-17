@@ -243,15 +243,15 @@ You cannot rollback to the original primary without data loss. Proceed with:
 
 Document these for post-incident review:
 
-| Metric | Value |
-|--------|-------|
-| Failover start time | |
-| PgBouncer pause time | |
-| Failover complete time | |
-| Total RTO | |
-| Replication lag at failover | |
-| Estimated RPO | |
-| Errors encountered | |
+| Metric                      | Value |
+|-----------------------------|-------|
+| Failover start time         |       |
+| PgBouncer pause time        |       |
+| Failover complete time      |       |
+| Total RTO                   |       |
+| Replication lag at failover |       |
+| Estimated RPO               |       |
+| Errors encountered          |       |
 
 ## Troubleshooting
 

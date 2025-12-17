@@ -147,16 +147,16 @@ fly ssh console -C "psql -h /var/run/pgbouncer -p 6432 -U pgbouncer pgbouncer -c
 
 ### Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DATABASE_HOST` | Supabase host (db.xxx.supabase.co) | Required |
-| `DATABASE_NAME` | Database name | Required |
-| `DATABASE_USER` | Database user | Required |
-| `DATABASE_PASSWORD` | Database password | Required |
-| `PGBOUNCER_ADMIN_PASSWORD` | Admin console password | Required |
-| `PGBOUNCER_POOL_MODE` | Pool mode (transaction/session/statement) | transaction |
-| `PGBOUNCER_MAX_CLIENT_CONN` | Max client connections | 1000 |
-| `PGBOUNCER_DEFAULT_POOL_SIZE` | Default pool size per database | 20 |
+| Variable                      | Description                               | Default     |
+|-------------------------------|-------------------------------------------|-------------|
+| `DATABASE_HOST`               | Supabase host (db.xxx.supabase.co)        | Required    |
+| `DATABASE_NAME`               | Database name                             | Required    |
+| `DATABASE_USER`               | Database user                             | Required    |
+| `DATABASE_PASSWORD`           | Database password                         | Required    |
+| `PGBOUNCER_ADMIN_PASSWORD`    | Admin console password                    | Required    |
+| `PGBOUNCER_POOL_MODE`         | Pool mode (transaction/session/statement) | transaction |
+| `PGBOUNCER_MAX_CLIENT_CONN`   | Max client connections                    | 1000        |
+| `PGBOUNCER_DEFAULT_POOL_SIZE` | Default pool size per database            | 20          |
 
 ### Pool Modes
 
@@ -248,13 +248,13 @@ fly secrets set PGBOUNCER_ADMIN_PASSWORD=new-password
 
 ## Files
 
-| File | Purpose |
-|------|---------|
-| `fly.toml` | Fly.io app configuration |
-| `Dockerfile` | Container image definition |
-| `pgbouncer.ini.template` | PgBouncer configuration template |
-| `userlist.txt.template` | PgBouncer authentication file template |
-| `entrypoint.sh` | Container startup script |
+| File                     | Purpose                                |
+|--------------------------|----------------------------------------|
+| `fly.toml`               | Fly.io app configuration               |
+| `Dockerfile`             | Container image definition             |
+| `pgbouncer.ini.template` | PgBouncer configuration template       |
+| `userlist.txt.template`  | PgBouncer authentication file template |
+| `entrypoint.sh`          | Container startup script               |
 
 ## Related Documentation
 

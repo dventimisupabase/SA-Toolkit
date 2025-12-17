@@ -138,13 +138,13 @@ Global control plane for routing:
 
 ## Design Constraints
 
-| Constraint | Rationale |
-|------------|-----------|
-| Single writer at all times | Prevents split-brain and data conflicts |
-| One-way CDC only | Simplifies consistency model |
-| Manual failover | Allows human verification before promotion |
-| No zero-RPO guarantee | Async replication has inherent lag |
-| Auth sessions invalidate | Simplifies failover vs. session replication |
+| Constraint                    | Rationale                                      |
+|-------------------------------|------------------------------------------------|
+| Single writer at all times    | Prevents split-brain and data conflicts        |
+| One-way CDC only              | Simplifies consistency model                   |
+| Manual failover               | Allows human verification before promotion     |
+| No zero-RPO guarantee         | Async replication has inherent lag             |
+| Auth sessions invalidate      | Simplifies failover vs. session replication    |
 | Realtime state not replicated | Ephemeral nature makes replication impractical |
 
 ## Limitations
@@ -153,11 +153,11 @@ Global control plane for routing:
 
 Supabase uses WAL-G internally for physical backups, but customers cannot access these backups directly. This has implications for standby initialization:
 
-| Requirement | Physical Backup Tools Need | Supabase Provides |
-|-------------|---------------------------|-------------------|
-| File system access | Direct access to `PGDATA` | Database access only |
-| WAL archiving control | `archive_command` configuration | Managed internally |
-| Server-side agent | Runs on PostgreSQL host | No SSH/shell access |
+| Requirement           | Physical Backup Tools Need      | Supabase Provides    |
+|-----------------------|---------------------------------|----------------------|
+| File system access    | Direct access to `PGDATA`       | Database access only |
+| WAL archiving control | `archive_command` configuration | Managed internally   |
+| Server-side agent     | Runs on PostgreSQL host         | No SSH/shell access  |
 
 **Consequence**: The standby must be initialized using logical methods:
 
@@ -189,11 +189,11 @@ For very large databases (hundreds of GB to TB scale), this means longer initial
 
 ## RTO/RPO Expectations
 
-| Metric | Expected Value | Notes |
-|--------|----------------|-------|
-| RPO | Seconds to minutes | Depends on replication lag at failure time |
-| RTO (scripted) | 2-5 minutes | With prepared scripts and runbooks |
-| RTO (manual) | 5-15 minutes | With human verification at each step |
+| Metric         | Expected Value     | Notes                                      |
+|----------------|--------------------|--------------------------------------------|
+| RPO            | Seconds to minutes | Depends on replication lag at failure time |
+| RTO (scripted) | 2-5 minutes        | With prepared scripts and runbooks         |
+| RTO (manual)   | 5-15 minutes       | With human verification at each step       |
 
 ## Related Documents
 

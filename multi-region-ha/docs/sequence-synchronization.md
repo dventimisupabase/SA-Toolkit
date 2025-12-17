@@ -242,12 +242,12 @@ Drawbacks:
 
 ## Choosing Buffer Size
 
-| Scenario | Recommended Buffer | Rationale |
-|----------|-------------------|-----------|
-| Low write volume | 10,000 | Safe default |
-| Medium write volume | 100,000 | More headroom |
-| High write volume | 1,000,000 | Accommodate rapid inserts |
-| Time-critical failover | 10,000,000 | Maximum safety |
+| Scenario               | Recommended Buffer | Rationale                 |
+|------------------------|--------------------|---------------------------|
+| Low write volume       | 10,000             | Safe default              |
+| Medium write volume    | 100,000            | More headroom             |
+| High write volume      | 1,000,000          | Accommodate rapid inserts |
+| Time-critical failover | 10,000,000         | Maximum safety            |
 
 Calculate based on:
 - Peak inserts per second
