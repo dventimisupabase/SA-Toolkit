@@ -8,59 +8,59 @@ This is a Solutions Architect Toolkit - a collection of tools, scripts, and prog
 
 ## Design Principles
 
-- **Read-only database access**: Tools should collect diagnostics without writing to customer databases
 - **Standard libpq authentication**: Use `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `PGPASSWORD` environment variables or `.pgpass`
 - **Auto-detection over manual config**: Prefer querying the database for configuration (e.g., PG version) rather than requiring user input
-- **Local state storage**: Store telemetry/state files locally in `.telemetry/` directory, not in the database
 
 ## Tools
 
-### batch-telemetry/batch_telemetry.sh
+### batch-telemetry/sql/
 
-A client-side batch telemetry script for PostgreSQL 15, 16, or 17 that collects database performance metrics without writing to the database. Uses standard libpq environment variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `PGPASSWORD`) or `.pgpass` for authentication.
+Server-side batch telemetry for PostgreSQL 15, 16, or 17. Diagnoses batch job performance variance ("Why did this batch take 60 minutes instead of 10?").
 
-**Requirements:** bash, psql, jq
+**Requirements:** PostgreSQL 15+, pg_cron extension
 
-**Usage:**
+**Installation:**
 ```bash
-./batch-telemetry/batch_telemetry.sh start  batch_1 "10M row import" | tee batch_1.log
-./batch-telemetry/batch_telemetry.sh sample batch_1                 | tee -a batch_1.log
-./batch-telemetry/batch_telemetry.sh end    batch_1                 | tee -a batch_1.log
-./batch-telemetry/batch_telemetry.sh report batch_1
-
-# With table tracking:
-./batch-telemetry/batch_telemetry.sh --table orders start batch_1 "import"
+psql -f batch-telemetry/sql/install.sql
 ```
 
-PostgreSQL version is auto-detected from the connected database.
-
-**Commands:**
-- `start` - Begin tracking, capture initial state (settings, WAL, bgwriter/checkpointer stats, replication slots, pg_stat_io)
-- `sample` - Capture point-in-time snapshot (wait events, active sessions, vacuum progress, COPY progress, I/O by backend)
-- `end` - Finalize tracking, capture end state
-- `report` - Generate summary report with deltas and interpretation guide
-
-**Options:**
-- `--table <name>` - Track table-specific stats (size, tuple counts, autovacuum activity)
-
-**State files:** Stored in `.telemetry/<batch_id>.json`
-
-**PG version differences:**
-- PG 15: Uses `pg_stat_bgwriter` for all checkpoint stats, no `pg_stat_io`
-- PG 16: Uses `pg_stat_bgwriter` for checkpoint stats, `pg_stat_io` available
-- PG 17: Checkpoint stats split into `pg_stat_checkpointer`, `pg_stat_io` available
-
-**Testing:**
+**Uninstall:**
 ```bash
-# Verify syntax
-bash -n batch-telemetry/batch_telemetry.sh
-
-# Test against a database (requires PG* env vars or .pgpass)
-./batch-telemetry/batch_telemetry.sh start test_batch "test run"
-./batch-telemetry/batch_telemetry.sh sample test_batch
-./batch-telemetry/batch_telemetry.sh end test_batch
-./batch-telemetry/batch_telemetry.sh report test_batch
-
-# Clean up
-rm .telemetry/test_batch.json
+psql -f batch-telemetry/sql/uninstall.sql
 ```
+
+**Quick Start:**
+```sql
+-- 1. Track your target table(s)
+SELECT telemetry.track_table('orders');
+
+-- 2. Run your batch job, note start/end times
+
+-- 3. Analyze
+SELECT * FROM telemetry.compare('2024-12-16 14:00', '2024-12-16 15:00');
+SELECT * FROM telemetry.table_compare('orders', '2024-12-16 14:00', '2024-12-16 15:00');
+SELECT * FROM telemetry.wait_summary('2024-12-16 14:00', '2024-12-16 15:00');
+```
+
+**Two-Tier Collection (via pg_cron):**
+- Snapshots (every 5 min): WAL, checkpoints, bgwriter, replication, temp files, I/O stats
+- Samples (every 30 sec): wait events, active sessions, lock contention, operation progress
+
+**Key Views:**
+- `telemetry.deltas` - Snapshot deltas (checkpoint, WAL, buffer pressure, temp files)
+- `telemetry.recent_locks` - Lock contention (last 2 hours)
+- `telemetry.recent_waits` - Wait events (last 2 hours)
+- `telemetry.recent_replication` - Replication lag (last 2 hours)
+
+**Diagnostic Patterns:**
+1. Lock contention - `recent_locks` shows blocked_pid entries
+2. Buffer pressure - `bgw_buffers_backend_delta > 0`
+3. Checkpoint interference - `checkpoint_occurred = true`
+4. Autovacuum interference - `autovacuum_ran = true`
+5. Temp file spills - `temp_files_delta > 0`
+6. Replication lag - `recent_replication` shows high replay_lag
+
+**PG Version Differences:**
+- PG 15: Checkpoint stats in pg_stat_bgwriter, no pg_stat_io
+- PG 16: Checkpoint stats in pg_stat_bgwriter, pg_stat_io available
+- PG 17: Checkpoint stats in pg_stat_checkpointer, pg_stat_io available
