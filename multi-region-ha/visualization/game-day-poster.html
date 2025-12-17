@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DR Game Day Poster</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@400;500;600;700&display=swap');
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Rajdhani', sans-serif;
+            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            padding: 40px 20px;
+        }
+
+        .poster {
+            width: 800px;
+            height: 1100px;
+            background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+            border-radius: 20px;
+            position: relative;
+            overflow: hidden;
+            box-shadow:
+                0 0 60px rgba(59, 130, 246, 0.3),
+                0 0 120px rgba(139, 92, 246, 0.2),
+                inset 0 0 100px rgba(0, 0, 0, 0.5);
+            border: 2px solid rgba(59, 130, 246, 0.3);
+        }
+
+        /* Animated background grid */
+        .grid-bg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-image:
+                linear-gradient(rgba(59, 130, 246, 0.1) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(59, 130, 246, 0.1) 1px, transparent 1px);
+            background-size: 40px 40px;
+            animation: gridMove 20s linear infinite;
+        }
+
+        @keyframes gridMove {
+            0% { transform: translate(0, 0); }
+            100% { transform: translate(40px, 40px); }
+        }
+
+        /* Glowing orbs */
+        .orb {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(60px);
+            animation: float 8s ease-in-out infinite;
+        }
+
+        .orb-1 {
+            width: 300px;
+            height: 300px;
+            background: rgba(59, 130, 246, 0.4);
+            top: -100px;
+            right: -100px;
+            animation-delay: 0s;
+        }
+
+        .orb-2 {
+            width: 250px;
+            height: 250px;
+            background: rgba(139, 92, 246, 0.4);
+            bottom: -50px;
+            left: -50px;
+            animation-delay: -4s;
+        }
+
+        .orb-3 {
+            width: 200px;
+            height: 200px;
+            background: rgba(34, 197, 94, 0.3);
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            animation-delay: -2s;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translate(0, 0) scale(1); }
+            50% { transform: translate(20px, -20px) scale(1.1); }
+        }
+
+        .content {
+            position: relative;
+            z-index: 10;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            padding: 40px;
+        }
+
+        /* Header */
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .badge {
+            display: inline-block;
+            background: linear-gradient(135deg, #ef4444, #f97316);
+            color: white;
+            padding: 8px 24px;
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-bottom: 20px;
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 20px rgba(239, 68, 68, 0.5); }
+            50% { box-shadow: 0 0 40px rgba(239, 68, 68, 0.8); }
+        }
+
+        .title {
+            font-family: 'Orbitron', monospace;
+            font-size: 72px;
+            font-weight: 900;
+            background: linear-gradient(135deg, #60a5fa, #a78bfa, #34d399);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-shadow: 0 0 60px rgba(96, 165, 250, 0.5);
+            line-height: 1.1;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            font-size: 28px;
+            color: #94a3b8;
+            font-weight: 500;
+            letter-spacing: 8px;
+            text-transform: uppercase;
+        }
+
+        /* Main visual */
+        .visual {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+
+        .database-icon {
+            position: relative;
+        }
+
+        .db-main {
+            width: 200px;
+            height: 240px;
+            position: relative;
+        }
+
+        .db-cylinder {
+            fill: none;
+            stroke: url(#dbGradient);
+            stroke-width: 3;
+        }
+
+        .db-fill {
+            fill: url(#dbFillGradient);
+            opacity: 0.3;
+        }
+
+        .shield {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 120px;
+            height: 140px;
+        }
+
+        .shield-icon {
+            fill: none;
+            stroke: #22c55e;
+            stroke-width: 3;
+            filter: drop-shadow(0 0 20px rgba(34, 197, 94, 0.6));
+            animation: shieldPulse 3s ease-in-out infinite;
+        }
+
+        .shield-fill {
+            fill: rgba(34, 197, 94, 0.2);
+        }
+
+        .checkmark {
+            stroke: #22c55e;
+            stroke-width: 4;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            fill: none;
+            stroke-dasharray: 50;
+            stroke-dashoffset: 50;
+            animation: drawCheck 2s ease-out forwards;
+            animation-delay: 0.5s;
+        }
+
+        @keyframes drawCheck {
+            to { stroke-dashoffset: 0; }
+        }
+
+        @keyframes shieldPulse {
+            0%, 100% { filter: drop-shadow(0 0 20px rgba(34, 197, 94, 0.6)); }
+            50% { filter: drop-shadow(0 0 40px rgba(34, 197, 94, 0.9)); }
+        }
+
+        /* Orbiting elements */
+        .orbit {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 350px;
+            height: 350px;
+            border: 2px dashed rgba(59, 130, 246, 0.3);
+            border-radius: 50%;
+            animation: spin 30s linear infinite;
+        }
+
+        .orbit-dot {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            border-radius: 50%;
+            box-shadow: 0 0 20px rgba(59, 130, 246, 0.8);
+        }
+
+        .orbit-dot:nth-child(1) { top: -10px; left: 50%; transform: translateX(-50%); }
+        .orbit-dot:nth-child(2) { bottom: -10px; left: 50%; transform: translateX(-50%); }
+        .orbit-dot:nth-child(3) { left: -10px; top: 50%; transform: translateY(-50%); }
+        .orbit-dot:nth-child(4) { right: -10px; top: 50%; transform: translateY(-50%); }
+
+        @keyframes spin {
+            from { transform: translate(-50%, -50%) rotate(0deg); }
+            to { transform: translate(-50%, -50%) rotate(360deg); }
+        }
+
+        /* Info section */
+        .info {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .info-card {
+            background: rgba(30, 41, 59, 0.8);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            border-radius: 16px;
+            padding: 24px;
+            text-align: center;
+            backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+        }
+
+        .info-card:hover {
+            transform: translateY(-5px);
+            border-color: rgba(59, 130, 246, 0.6);
+            box-shadow: 0 10px 40px rgba(59, 130, 246, 0.2);
+        }
+
+        .info-icon {
+            font-size: 36px;
+            margin-bottom: 12px;
+        }
+
+        .info-label {
+            color: #64748b;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 8px;
+        }
+
+        .info-value {
+            color: #f1f5f9;
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        /* Tagline */
+        .tagline {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .tagline-text {
+            font-size: 24px;
+            color: #cbd5e1;
+            font-weight: 500;
+            font-style: italic;
+        }
+
+        .tagline-text span {
+            color: #22c55e;
+            font-weight: 700;
+        }
+
+        /* What to expect */
+        .expect {
+            display: flex;
+            justify-content: center;
+            gap: 40px;
+            margin-bottom: 30px;
+        }
+
+        .expect-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            color: #94a3b8;
+            font-size: 16px;
+        }
+
+        .expect-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+        }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding-top: 20px;
+            border-top: 1px solid rgba(59, 130, 246, 0.2);
+        }
+
+        .footer-text {
+            color: #64748b;
+            font-size: 14px;
+            letter-spacing: 1px;
+        }
+
+        .footer-text a {
+            color: #60a5fa;
+            text-decoration: none;
+        }
+
+        /* Scanlines effect */
+        .scanlines {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: repeating-linear-gradient(
+                0deg,
+                transparent,
+                transparent 2px,
+                rgba(0, 0, 0, 0.1) 2px,
+                rgba(0, 0, 0, 0.1) 4px
+            );
+            pointer-events: none;
+            opacity: 0.3;
+        }
+
+        /* Editable fields */
+        .editable {
+            cursor: text;
+            padding: 4px 8px;
+            border-radius: 4px;
+            transition: background 0.2s;
+        }
+
+        .editable:hover {
+            background: rgba(59, 130, 246, 0.1);
+        }
+
+        .editable:focus {
+            outline: 2px solid rgba(59, 130, 246, 0.5);
+            background: rgba(59, 130, 246, 0.1);
+        }
+
+        /* Print styles */
+        @media print {
+            body {
+                background: white;
+                padding: 0;
+            }
+            .poster {
+                box-shadow: none;
+                border: none;
+            }
+            .scanlines {
+                display: none;
+            }
+        }
+
+        /* Instructions overlay */
+        .instructions {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(30, 41, 59, 0.95);
+            padding: 12px 24px;
+            border-radius: 30px;
+            color: #94a3b8;
+            font-size: 14px;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            z-index: 100;
+        }
+
+        .instructions kbd {
+            background: rgba(59, 130, 246, 0.2);
+            padding: 2px 8px;
+            border-radius: 4px;
+            margin: 0 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="poster">
+        <div class="grid-bg"></div>
+        <div class="orb orb-1"></div>
+        <div class="orb orb-2"></div>
+        <div class="orb orb-3"></div>
+        <div class="scanlines"></div>
+
+        <div class="content">
+            <header class="header">
+                <div class="badge">You're Invited</div>
+                <h1 class="title">GAME DAY</h1>
+                <p class="subtitle">Disaster Recovery</p>
+            </header>
+
+            <div class="visual">
+                <div class="orbit">
+                    <div class="orbit-dot"></div>
+                    <div class="orbit-dot"></div>
+                    <div class="orbit-dot"></div>
+                    <div class="orbit-dot"></div>
+                </div>
+
+                <div class="database-icon">
+                    <svg class="db-main" viewBox="0 0 100 120">
+                        <defs>
+                            <linearGradient id="dbGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" style="stop-color:#3b82f6" />
+                                <stop offset="100%" style="stop-color:#8b5cf6" />
+                            </linearGradient>
+                            <linearGradient id="dbFillGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                                <stop offset="0%" style="stop-color:#3b82f6" />
+                                <stop offset="100%" style="stop-color:#1e1b4b" />
+                            </linearGradient>
+                        </defs>
+                        <!-- Database cylinder -->
+                        <ellipse class="db-fill" cx="50" cy="20" rx="40" ry="15"/>
+                        <path class="db-fill" d="M10,20 L10,100 A40,15 0 0,0 90,100 L90,20 A40,15 0 0,1 10,20"/>
+                        <ellipse class="db-cylinder" cx="50" cy="20" rx="40" ry="15"/>
+                        <ellipse class="db-cylinder" cx="50" cy="100" rx="40" ry="15"/>
+                        <line class="db-cylinder" x1="10" y1="20" x2="10" y2="100"/>
+                        <line class="db-cylinder" x1="90" y1="20" x2="90" y2="100"/>
+                        <!-- Middle rings -->
+                        <ellipse class="db-cylinder" cx="50" cy="45" rx="40" ry="12" style="opacity:0.5"/>
+                        <ellipse class="db-cylinder" cx="50" cy="70" rx="40" ry="12" style="opacity:0.5"/>
+                    </svg>
+
+                    <svg class="shield" viewBox="0 0 60 70">
+                        <path class="shield-fill shield-icon" d="M30,5 L55,15 L55,35 C55,50 42,62 30,67 C18,62 5,50 5,35 L5,15 Z"/>
+                        <polyline class="checkmark" points="18,35 27,44 42,26"/>
+                    </svg>
+                </div>
+            </div>
+
+            <div class="info">
+                <div class="info-card">
+                    <div class="info-icon">📅</div>
+                    <div class="info-label">Date</div>
+                    <div class="info-value editable" contenteditable="true">[DATE]</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-icon">⏰</div>
+                    <div class="info-label">Time</div>
+                    <div class="info-value editable" contenteditable="true">[TIME]</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-icon">📍</div>
+                    <div class="info-label">Location</div>
+                    <div class="info-value editable" contenteditable="true">[LOCATION]</div>
+                </div>
+            </div>
+
+            <div class="tagline">
+                <p class="tagline-text">"Make it real enough to <span>learn</span>, safe enough to <span>fail</span>."</p>
+            </div>
+
+            <div class="expect">
+                <div class="expect-item">
+                    <div class="expect-dot"></div>
+                    <span>Hands-on Failover Practice</span>
+                </div>
+                <div class="expect-item">
+                    <div class="expect-dot"></div>
+                    <span>Sandbox Environment</span>
+                </div>
+                <div class="expect-item">
+                    <div class="expect-dot"></div>
+                    <span>Team Collaboration</span>
+                </div>
+            </div>
+
+            <footer class="footer">
+                <p class="footer-text">Multi-Region Supabase HA/DR • Questions? Contact <span class="editable" contenteditable="true">[ORGANIZER]</span></p>
+            </footer>
+        </div>
+    </div>
+
+    <div class="instructions">
+        Click on <kbd>[DATE]</kbd> <kbd>[TIME]</kbd> <kbd>[LOCATION]</kbd> to edit • <kbd>Ctrl+P</kbd> to print
+    </div>
+</body>
+</html>
