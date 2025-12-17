@@ -57,6 +57,14 @@ Walk through the failover procedure without executing:
 4. Discuss decision points and edge cases
 5. Document improvements
 
+**See [Tabletop Exercises](tabletop-exercises.md) for detailed scenario scripts including:**
+- Scenario 1: Primary Region Outage (standard)
+- Scenario 2: Replication Lag Crisis (intermediate)
+- Scenario 3: Partial Failure - PgBouncer Down (standard)
+- Scenario 4: Split-Brain Prevention (advanced)
+- Scenario 5: Cascading Failure During Failover (advanced)
+- Scenario 6: The Non-Technical Stakeholder (communication)
+
 **Discussion topics:**
 - Who initiates failover?
 - What approvals are needed?
