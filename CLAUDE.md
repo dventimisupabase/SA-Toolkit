@@ -110,3 +110,37 @@ cp multi-region-ha/config/env.example multi-region-ha/config/.env
 - `runbooks/failback-runbook.md` - Return to original primary
 - `runbooks/emergency-runbook.md` - When primary is unreachable
 - `runbooks/testing-runbook.md` - Practice and validation
+
+### storage-to-s3/
+
+One-time migration tool to move objects from Supabase Storage to AWS S3.
+
+**Requirements:** Supabase CLI (linked to project), AWS CLI v2
+
+**Quick Start:**
+```bash
+# 1. Link Supabase project
+supabase link --project-ref <your-project-ref>
+
+# 2. Configure
+cp storage-to-s3/config/env.example storage-to-s3/config/.env
+# Edit .env: AWS_S3_BUCKET, AWS_REGION, SUPABASE_BUCKETS
+
+# 3. Preview
+./storage-to-s3/scripts/migrate.sh --dry-run
+
+# 4. Migrate
+./storage-to-s3/scripts/migrate.sh
+
+# 5. Verify
+./storage-to-s3/scripts/verify.sh
+```
+
+**Key Scripts:**
+- `scripts/migrate.sh` - Main migration (supports `--dry-run`, `--bucket NAME`)
+- `scripts/verify.sh` - Compare object counts between Supabase and S3
+
+**Configuration:**
+- `SUPABASE_BUCKETS` - `"all"` or space-separated bucket names
+- `AWS_S3_BUCKET` - Target S3 bucket
+- `S3_PREFIX` - Optional prefix for migrated objects
