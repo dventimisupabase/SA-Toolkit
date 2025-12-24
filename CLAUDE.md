@@ -144,3 +144,36 @@ cp storage-to-s3/config/env.example storage-to-s3/config/.env
 - `SUPABASE_BUCKETS` - `"all"` or space-separated bucket names
 - `AWS_S3_BUCKET` - Target S3 bucket
 - `S3_PREFIX` - Optional prefix for migrated objects
+
+### enable-rls-automatically/
+
+Event trigger that automatically enables Row Level Security (RLS) with FORCE option on all newly-created tables in the public schema.
+
+**Requirements:** PostgreSQL 9.3+ (event triggers), superuser or rds_superuser privileges
+
+**Installation:**
+```bash
+psql -f enable-rls-automatically/install.sql
+```
+
+**Uninstall:**
+```bash
+psql -f enable-rls-automatically/uninstall.sql
+```
+
+**How It Works:**
+- Uses a `ddl_command_end` event trigger that fires after `CREATE TABLE`
+- Automatically runs `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` and `ALTER TABLE ... FORCE ROW LEVEL SECURITY`
+- Only affects tables in the `public` schema
+
+**Verify:**
+```sql
+-- Create a test table
+CREATE TABLE public.test_rls_table (id int);
+
+-- Check RLS is enabled
+SELECT relname, relrowsecurity, relforcerowsecurity
+FROM pg_class
+WHERE relname = 'test_rls_table';
+-- Both columns should be true
+```
