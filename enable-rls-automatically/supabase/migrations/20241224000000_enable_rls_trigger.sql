@@ -2,11 +2,9 @@
 --
 -- This event trigger automatically enables Row Level Security (RLS) with FORCE
 -- option on all newly-created tables in the public schema.
---
--- Usage: psql -f install.sql
 
 -- Function that enables RLS on newly created tables
-CREATE OR REPLACE FUNCTION enable_rls_on_new_tables()
+CREATE OR REPLACE FUNCTION public.enable_rls_on_new_tables()
 RETURNS event_trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -32,4 +30,4 @@ $$;
 CREATE EVENT TRIGGER enable_rls_trigger
 ON ddl_command_end
 WHEN TAG IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO')
-EXECUTE FUNCTION enable_rls_on_new_tables();
+EXECUTE FUNCTION public.enable_rls_on_new_tables();
