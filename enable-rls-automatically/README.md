@@ -10,24 +10,38 @@ The `FORCE` option ensures RLS policies apply even to table owners (like the `po
 
 ## Requirements
 
-- PostgreSQL 9.3+ (event triggers)
-- Superuser or `rds_superuser` privileges (required to create event triggers)
+- Supabase project (local or hosted)
+- Supabase CLI (`supabase --version` >= 1.0)
+- Docker (for local development)
 
-## Installation
+## Quick Start
+
+### Local Development
 
 ```bash
-psql -f install.sql
+# Start local Supabase
+supabase start
+
+# Apply migration (enables the trigger)
+supabase db reset
+
+# Run tests
+supabase test db
 ```
 
-## Uninstall
+### Deploy to Hosted Project
 
 ```bash
-psql -f uninstall.sql
+# Link to your project
+supabase link --project-ref <your-project-ref>
+
+# Push migration
+supabase db push
 ```
 
 ## Usage
 
-Once installed, RLS is automatically enabled on any new table created in the public schema:
+Once deployed, RLS is automatically enabled on any new table created in the public schema:
 
 ```sql
 CREATE TABLE public.users (id int, email text);
@@ -60,6 +74,62 @@ Both `relrowsecurity` and `relforcerowsecurity` should be `t` (true).
 3. If so, it executes:
    - `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`
    - `ALTER TABLE ... FORCE ROW LEVEL SECURITY`
+
+## Project Structure
+
+```
+enable-rls-automatically/
+├── supabase/
+│   ├── config.toml              # Supabase configuration
+│   ├── migrations/
+│   │   └── 20241224000000_enable_rls_trigger.sql
+│   └── tests/
+│       └── 00001_rls_trigger_test.sql
+├── install.sql                  # Standalone install (non-Supabase)
+├── uninstall.sql                # Standalone uninstall
+└── README.md
+```
+
+## Testing
+
+The test suite uses [pgTAP](https://pgtap.org/) via `supabase test db`.
+
+### Run Tests Locally
+
+```bash
+# Ensure local Supabase is running
+supabase start
+
+# Run all tests (34 tests)
+supabase test db
+```
+
+### Test Coverage
+
+| Category | Tests | Description |
+|----------|-------|-------------|
+| Installation Verification | 4 | Function/trigger existence, correct event binding |
+| Core Functionality | 4 | RLS + FORCE enabled on basic/constrained tables |
+| Schema Filtering | 4 | public only; temp/private/auth ignored |
+| CREATE TABLE Variants | 6 | CTAS, LIKE, IF NOT EXISTS, UNLOGGED, partitioned |
+| Non-Triggering DDL | 5 | Views, matviews, ALTER, INDEX, SEQUENCE |
+| Edge Cases | 5 | Special chars, mixed case, reserved words, idempotency |
+| Transaction Behavior | 2 | Savepoint rollback, visibility |
+| Uninstall Verification | 4 | Disable/enable trigger, behavior changes |
+
+## Standalone Installation (Non-Supabase)
+
+For PostgreSQL without Supabase:
+
+```bash
+# Install
+psql -f install.sql
+
+# Uninstall
+psql -f uninstall.sql
+```
+
+Requires PostgreSQL 9.3+ and superuser or `rds_superuser` privileges.
 
 ## Important Notes
 
