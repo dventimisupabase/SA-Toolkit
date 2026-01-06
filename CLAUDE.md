@@ -24,8 +24,8 @@ Server-side performance telemetry for PostgreSQL 15, 16, or 17. Continuously col
 
 **Quick Reference:**
 ```bash
-psql -f pg-telemetry/sql/install.sql    # Install
-psql -f pg-telemetry/sql/uninstall.sql  # Uninstall
+psql -f pg-telemetry/install.sql    # Install
+psql -f pg-telemetry/uninstall.sql  # Uninstall
 ```
 
 ```sql

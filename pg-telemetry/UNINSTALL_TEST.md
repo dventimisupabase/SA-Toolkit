@@ -30,7 +30,7 @@ While harmless (historical execution logs), these leftover records meant the uni
 
 ## Fix Applied
 
-Updated `/pg-telemetry/sql/uninstall.sql` to:
+Updated `/pg-telemetry/uninstall.sql` to:
 
 1. **Capture job IDs before unscheduling:**
    ```sql

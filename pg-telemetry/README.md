@@ -46,10 +46,10 @@ This tool provides ASH-like functionality using **only built-in PostgreSQL featu
 
 ```bash
 # Install
-psql -f sql/install.sql
+psql -f install.sql
 
 # Uninstall
-psql -f sql/uninstall.sql
+psql -f uninstall.sql
 ```
 
 ```sql
