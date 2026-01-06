@@ -437,6 +437,49 @@ CREATE TABLE IF NOT EXISTS telemetry.replication_snapshots (
 );
 
 -- -----------------------------------------------------------------------------
+-- Table: statement_snapshots - pg_stat_statements metrics per snapshot
+-- -----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS telemetry.statement_snapshots (
+    snapshot_id         INTEGER REFERENCES telemetry.snapshots(id) ON DELETE CASCADE,
+    queryid             BIGINT NOT NULL,
+    userid              OID,
+    dbid                OID,
+
+    -- Query text (truncated for storage)
+    query_preview       TEXT,
+
+    -- Cumulative counters (for delta calculation)
+    calls               BIGINT,
+    total_exec_time     DOUBLE PRECISION,
+    min_exec_time       DOUBLE PRECISION,
+    max_exec_time       DOUBLE PRECISION,
+    mean_exec_time      DOUBLE PRECISION,
+    rows                BIGINT,
+
+    -- Block I/O
+    shared_blks_hit     BIGINT,
+    shared_blks_read    BIGINT,
+    shared_blks_dirtied BIGINT,
+    shared_blks_written BIGINT,
+    temp_blks_read      BIGINT,
+    temp_blks_written   BIGINT,
+
+    -- I/O timing (if track_io_timing enabled)
+    blk_read_time       DOUBLE PRECISION,
+    blk_write_time      DOUBLE PRECISION,
+
+    -- WAL (PG13+)
+    wal_records         BIGINT,
+    wal_bytes           NUMERIC,
+
+    PRIMARY KEY (snapshot_id, queryid, dbid)
+);
+
+CREATE INDEX IF NOT EXISTS statement_snapshots_queryid_idx
+    ON telemetry.statement_snapshots(queryid);
+
+-- -----------------------------------------------------------------------------
 -- Table: samples - High-frequency sampling (every 30 seconds)
 -- -----------------------------------------------------------------------------
 
@@ -548,6 +591,51 @@ LANGUAGE sql STABLE AS $$
 $$;
 
 -- -----------------------------------------------------------------------------
+-- Table: config - Telemetry configuration settings
+-- -----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS telemetry.config (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+
+-- Default configuration
+INSERT INTO telemetry.config (key, value) VALUES
+    ('mode', 'normal'),
+    ('statements_enabled', 'auto'),
+    ('statements_top_n', '50'),
+    ('statements_min_calls', '1'),
+    ('enable_locks', 'true'),
+    ('enable_progress', 'true')
+ON CONFLICT (key) DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Helper: Get config value with default
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry._get_config(p_key TEXT, p_default TEXT DEFAULT NULL)
+RETURNS TEXT
+LANGUAGE sql STABLE AS $$
+    SELECT COALESCE(
+        (SELECT value FROM telemetry.config WHERE key = p_key),
+        p_default
+    )
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Helper: Check if pg_stat_statements is available
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry._has_pg_stat_statements()
+RETURNS BOOLEAN
+LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'
+    )
+$$;
+
+-- -----------------------------------------------------------------------------
 -- Table tracking functions
 -- -----------------------------------------------------------------------------
 
@@ -605,13 +693,26 @@ LANGUAGE plpgsql AS $$
 DECLARE
     v_sample_id INTEGER;
     v_captured_at TIMESTAMPTZ := now();
+    v_enable_locks BOOLEAN;
+    v_enable_progress BOOLEAN;
 BEGIN
+    -- Get configuration
+    v_enable_locks := COALESCE(
+        telemetry._get_config('enable_locks', 'true')::boolean,
+        TRUE
+    );
+    v_enable_progress := COALESCE(
+        telemetry._get_config('enable_progress', 'true')::boolean,
+        TRUE
+    );
+
     -- Create sample record
     INSERT INTO telemetry.samples (captured_at)
     VALUES (v_captured_at)
     RETURNING id INTO v_sample_id;
 
     -- Wait events (aggregated by backend_type, wait_event_type, wait_event, state)
+    -- Always captured - low overhead
     INSERT INTO telemetry.wait_samples (sample_id, backend_type, wait_event_type, wait_event, state, count)
     SELECT
         v_sample_id,
@@ -625,6 +726,7 @@ BEGIN
     GROUP BY backend_type, wait_event_type, wait_event, state;
 
     -- Active sessions (top 25 by duration, non-idle)
+    -- Always captured - low overhead
     INSERT INTO telemetry.activity_samples (
         sample_id, pid, usename, application_name, backend_type,
         state, wait_event_type, wait_event, query_start, state_change, query_preview
@@ -646,6 +748,8 @@ BEGIN
     ORDER BY query_start ASC NULLS LAST
     LIMIT 25;
 
+    -- Progress tracking (conditionally captured)
+    IF v_enable_progress THEN
     -- Vacuum progress
     INSERT INTO telemetry.progress_samples (
         sample_id, progress_type, pid, relid, relname, phase,
@@ -735,7 +839,10 @@ BEGIN
             'partitions_done', p.partitions_done
         )
     FROM pg_stat_progress_create_index p;
+    END IF;  -- v_enable_progress
 
+    -- Lock sampling (conditionally captured)
+    IF v_enable_locks THEN
     -- Blocking locks
     INSERT INTO telemetry.lock_samples (
         sample_id, blocked_pid, blocked_user, blocked_app, blocked_query_preview, blocked_duration,
@@ -771,6 +878,7 @@ BEGIN
     )
     JOIN pg_stat_activity blocking ON blocking.pid = kl.pid
     WHERE NOT bl.granted AND kl.granted;
+    END IF;  -- v_enable_locks
 
     RETURN v_captured_at;
 END;
@@ -1002,6 +1110,53 @@ BEGIN
         flush_lag,
         replay_lag
     FROM pg_stat_replication;
+
+    -- Capture pg_stat_statements (if available and enabled)
+    IF telemetry._has_pg_stat_statements()
+       AND telemetry._get_config('statements_enabled', 'auto') != 'false'
+    THEN
+        BEGIN
+            INSERT INTO telemetry.statement_snapshots (
+                snapshot_id, queryid, userid, dbid, query_preview,
+                calls, total_exec_time, min_exec_time, max_exec_time,
+                mean_exec_time, rows,
+                shared_blks_hit, shared_blks_read, shared_blks_dirtied, shared_blks_written,
+                temp_blks_read, temp_blks_written,
+                blk_read_time, blk_write_time,
+                wal_records, wal_bytes
+            )
+            SELECT
+                v_snapshot_id,
+                s.queryid,
+                s.userid,
+                s.dbid,
+                left(s.query, 500),
+                s.calls,
+                s.total_exec_time,
+                s.min_exec_time,
+                s.max_exec_time,
+                s.mean_exec_time,
+                s.rows,
+                s.shared_blks_hit,
+                s.shared_blks_read,
+                s.shared_blks_dirtied,
+                s.shared_blks_written,
+                s.temp_blks_read,
+                s.temp_blks_written,
+                s.blk_read_time,
+                s.blk_write_time,
+                s.wal_records,
+                s.wal_bytes
+            FROM pg_stat_statements s
+            WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+              AND s.calls >= COALESCE(telemetry._get_config('statements_min_calls', '1')::integer, 1)
+            ORDER BY s.total_exec_time DESC
+            LIMIT COALESCE(telemetry._get_config('statements_top_n', '50')::integer, 50);
+        EXCEPTION
+            WHEN undefined_table THEN NULL;
+            WHEN undefined_column THEN NULL;
+        END;
+    END IF;
 
     RETURN v_captured_at;
 END;
@@ -1470,6 +1625,661 @@ LANGUAGE sql STABLE AS $$
         e.autovacuum_count - s.autovacuum_count,
         e.autoanalyze_count - s.autoanalyze_count
     FROM start_snap s, end_snap e
+$$;
+
+-- -----------------------------------------------------------------------------
+-- telemetry.statement_compare() - Compare query stats between two time points
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry.statement_compare(
+    p_start_time TIMESTAMPTZ,
+    p_end_time TIMESTAMPTZ,
+    p_min_delta_ms DOUBLE PRECISION DEFAULT 100,
+    p_limit INTEGER DEFAULT 25
+)
+RETURNS TABLE(
+    queryid                     BIGINT,
+    query_preview               TEXT,
+
+    calls_start                 BIGINT,
+    calls_end                   BIGINT,
+    calls_delta                 BIGINT,
+
+    total_exec_time_start_ms    DOUBLE PRECISION,
+    total_exec_time_end_ms      DOUBLE PRECISION,
+    total_exec_time_delta_ms    DOUBLE PRECISION,
+
+    mean_exec_time_start_ms     DOUBLE PRECISION,
+    mean_exec_time_end_ms       DOUBLE PRECISION,
+
+    rows_delta                  BIGINT,
+
+    shared_blks_hit_delta       BIGINT,
+    shared_blks_read_delta      BIGINT,
+    shared_blks_written_delta   BIGINT,
+
+    temp_blks_read_delta        BIGINT,
+    temp_blks_written_delta     BIGINT,
+
+    wal_bytes_delta             NUMERIC,
+
+    hit_ratio_pct               NUMERIC,
+    time_per_call_ms            DOUBLE PRECISION
+)
+LANGUAGE sql STABLE AS $$
+    WITH
+    start_snap AS (
+        SELECT ss.*, s.captured_at
+        FROM telemetry.statement_snapshots ss
+        JOIN telemetry.snapshots s ON s.id = ss.snapshot_id
+        WHERE s.captured_at <= p_start_time
+        ORDER BY s.captured_at DESC
+        LIMIT 1000
+    ),
+    end_snap AS (
+        SELECT ss.*, s.captured_at
+        FROM telemetry.statement_snapshots ss
+        JOIN telemetry.snapshots s ON s.id = ss.snapshot_id
+        WHERE s.captured_at >= p_end_time
+        ORDER BY s.captured_at ASC
+        LIMIT 1000
+    ),
+    matched AS (
+        SELECT
+            e.queryid,
+            COALESCE(e.query_preview, s.query_preview) AS query_preview,
+
+            s.calls AS calls_start,
+            e.calls AS calls_end,
+
+            s.total_exec_time AS total_exec_time_start,
+            e.total_exec_time AS total_exec_time_end,
+
+            s.mean_exec_time AS mean_exec_time_start,
+            e.mean_exec_time AS mean_exec_time_end,
+
+            s.rows AS rows_start,
+            e.rows AS rows_end,
+
+            s.shared_blks_hit AS shared_blks_hit_start,
+            e.shared_blks_hit AS shared_blks_hit_end,
+
+            s.shared_blks_read AS shared_blks_read_start,
+            e.shared_blks_read AS shared_blks_read_end,
+
+            s.shared_blks_written AS shared_blks_written_start,
+            e.shared_blks_written AS shared_blks_written_end,
+
+            s.temp_blks_read AS temp_blks_read_start,
+            e.temp_blks_read AS temp_blks_read_end,
+
+            s.temp_blks_written AS temp_blks_written_start,
+            e.temp_blks_written AS temp_blks_written_end,
+
+            s.wal_bytes AS wal_bytes_start,
+            e.wal_bytes AS wal_bytes_end
+        FROM end_snap e
+        LEFT JOIN start_snap s ON s.queryid = e.queryid AND s.dbid = e.dbid
+    )
+    SELECT
+        m.queryid,
+        m.query_preview,
+
+        COALESCE(m.calls_start, 0),
+        m.calls_end,
+        m.calls_end - COALESCE(m.calls_start, 0),
+
+        COALESCE(m.total_exec_time_start, 0),
+        m.total_exec_time_end,
+        m.total_exec_time_end - COALESCE(m.total_exec_time_start, 0),
+
+        m.mean_exec_time_start,
+        m.mean_exec_time_end,
+
+        m.rows_end - COALESCE(m.rows_start, 0),
+
+        m.shared_blks_hit_end - COALESCE(m.shared_blks_hit_start, 0),
+        m.shared_blks_read_end - COALESCE(m.shared_blks_read_start, 0),
+        m.shared_blks_written_end - COALESCE(m.shared_blks_written_start, 0),
+
+        m.temp_blks_read_end - COALESCE(m.temp_blks_read_start, 0),
+        m.temp_blks_written_end - COALESCE(m.temp_blks_written_start, 0),
+
+        m.wal_bytes_end - COALESCE(m.wal_bytes_start, 0),
+
+        CASE
+            WHEN (m.shared_blks_hit_end - COALESCE(m.shared_blks_hit_start, 0) +
+                  m.shared_blks_read_end - COALESCE(m.shared_blks_read_start, 0)) > 0
+            THEN round(
+                100.0 * (m.shared_blks_hit_end - COALESCE(m.shared_blks_hit_start, 0)) /
+                (m.shared_blks_hit_end - COALESCE(m.shared_blks_hit_start, 0) +
+                 m.shared_blks_read_end - COALESCE(m.shared_blks_read_start, 0)), 1
+            )
+            ELSE NULL
+        END,
+
+        CASE
+            WHEN (m.calls_end - COALESCE(m.calls_start, 0)) > 0
+            THEN (m.total_exec_time_end - COALESCE(m.total_exec_time_start, 0)) /
+                 (m.calls_end - COALESCE(m.calls_start, 0))
+            ELSE NULL
+        END
+
+    FROM matched m
+    WHERE (m.total_exec_time_end - COALESCE(m.total_exec_time_start, 0)) >= p_min_delta_ms
+    ORDER BY (m.total_exec_time_end - COALESCE(m.total_exec_time_start, 0)) DESC
+    LIMIT p_limit
+$$;
+
+-- -----------------------------------------------------------------------------
+-- telemetry.activity_at() - Show what was happening at a specific moment
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry.activity_at(p_timestamp TIMESTAMPTZ)
+RETURNS TABLE(
+    sample_captured_at      TIMESTAMPTZ,
+    sample_offset_seconds   NUMERIC,
+
+    active_sessions         INTEGER,
+    waiting_sessions        INTEGER,
+    idle_in_transaction     INTEGER,
+
+    top_wait_event_1        TEXT,
+    top_wait_count_1        INTEGER,
+    top_wait_event_2        TEXT,
+    top_wait_count_2        INTEGER,
+    top_wait_event_3        TEXT,
+    top_wait_count_3        INTEGER,
+
+    blocked_pids            INTEGER,
+    longest_blocked_duration INTERVAL,
+
+    vacuums_running         INTEGER,
+    copies_running          INTEGER,
+    indexes_building        INTEGER,
+    analyzes_running        INTEGER,
+
+    snapshot_captured_at    TIMESTAMPTZ,
+    snapshot_offset_seconds NUMERIC,
+    autovacuum_workers      INTEGER,
+    checkpoint_occurred     BOOLEAN
+)
+LANGUAGE sql STABLE AS $$
+    WITH
+    nearest_sample AS (
+        SELECT id, captured_at,
+               ABS(EXTRACT(EPOCH FROM (captured_at - p_timestamp))) AS offset_secs
+        FROM telemetry.samples
+        ORDER BY ABS(EXTRACT(EPOCH FROM (captured_at - p_timestamp)))
+        LIMIT 1
+    ),
+    nearest_snapshot AS (
+        SELECT s.id, s.captured_at, s.autovacuum_workers,
+               (s.checkpoint_time IS DISTINCT FROM prev.checkpoint_time) AS checkpoint_occurred,
+               ABS(EXTRACT(EPOCH FROM (s.captured_at - p_timestamp))) AS offset_secs
+        FROM telemetry.snapshots s
+        LEFT JOIN telemetry.snapshots prev ON prev.id = (
+            SELECT MAX(id) FROM telemetry.snapshots WHERE id < s.id
+        )
+        ORDER BY ABS(EXTRACT(EPOCH FROM (s.captured_at - p_timestamp)))
+        LIMIT 1
+    ),
+    sample_waits AS (
+        SELECT
+            wait_event_type || ':' || wait_event AS wait_event,
+            count
+        FROM telemetry.wait_samples w
+        JOIN nearest_sample ns ON ns.id = w.sample_id
+        WHERE w.state NOT IN ('idle', 'idle in transaction')
+        ORDER BY count DESC
+        LIMIT 3
+    ),
+    wait_array AS (
+        SELECT array_agg(wait_event ORDER BY count DESC) AS events,
+               array_agg(count ORDER BY count DESC) AS counts
+        FROM sample_waits
+    ),
+    sample_activity AS (
+        SELECT
+            count(*) FILTER (WHERE state = 'active') AS active_sessions,
+            count(*) FILTER (WHERE wait_event IS NOT NULL) AS waiting_sessions,
+            count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_transaction
+        FROM telemetry.activity_samples a
+        JOIN nearest_sample ns ON ns.id = a.sample_id
+    ),
+    sample_locks AS (
+        SELECT
+            count(DISTINCT blocked_pid) AS blocked_pids,
+            max(blocked_duration) AS longest_blocked
+        FROM telemetry.lock_samples l
+        JOIN nearest_sample ns ON ns.id = l.sample_id
+    ),
+    sample_progress AS (
+        SELECT
+            count(*) FILTER (WHERE progress_type = 'vacuum') AS vacuums,
+            count(*) FILTER (WHERE progress_type = 'copy') AS copies,
+            count(*) FILTER (WHERE progress_type = 'create_index') AS indexes,
+            count(*) FILTER (WHERE progress_type = 'analyze') AS analyzes
+        FROM telemetry.progress_samples p
+        JOIN nearest_sample ns ON ns.id = p.sample_id
+    )
+    SELECT
+        ns.captured_at,
+        ns.offset_secs::numeric,
+
+        COALESCE(sa.active_sessions, 0)::integer,
+        COALESCE(sa.waiting_sessions, 0)::integer,
+        COALESCE(sa.idle_in_transaction, 0)::integer,
+
+        wa.events[1],
+        wa.counts[1],
+        wa.events[2],
+        wa.counts[2],
+        wa.events[3],
+        wa.counts[3],
+
+        COALESCE(sl.blocked_pids, 0)::integer,
+        sl.longest_blocked,
+
+        COALESCE(sp.vacuums, 0)::integer,
+        COALESCE(sp.copies, 0)::integer,
+        COALESCE(sp.indexes, 0)::integer,
+        COALESCE(sp.analyzes, 0)::integer,
+
+        sn.captured_at,
+        sn.offset_secs::numeric,
+        sn.autovacuum_workers,
+        sn.checkpoint_occurred
+    FROM nearest_sample ns
+    CROSS JOIN nearest_snapshot sn
+    CROSS JOIN sample_activity sa
+    CROSS JOIN sample_locks sl
+    CROSS JOIN sample_progress sp
+    CROSS JOIN wait_array wa
+$$;
+
+-- -----------------------------------------------------------------------------
+-- telemetry.anomaly_report() - Flag unusual patterns in a time window
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry.anomaly_report(
+    p_start_time TIMESTAMPTZ,
+    p_end_time TIMESTAMPTZ
+)
+RETURNS TABLE(
+    anomaly_type        TEXT,
+    severity            TEXT,
+    description         TEXT,
+    metric_value        TEXT,
+    threshold           TEXT,
+    recommendation      TEXT
+)
+LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    v_cmp RECORD;
+    v_wait_pct NUMERIC;
+    v_lock_count INTEGER;
+    v_max_block_duration INTERVAL;
+BEGIN
+    -- Get comparison data
+    SELECT * INTO v_cmp FROM telemetry.compare(p_start_time, p_end_time);
+
+    -- Check 1: Checkpoint occurred during window
+    IF v_cmp.checkpoint_occurred THEN
+        anomaly_type := 'CHECKPOINT_DURING_WINDOW';
+        severity := CASE
+            WHEN v_cmp.ckpt_write_time_ms > 30000 THEN 'high'
+            WHEN v_cmp.ckpt_write_time_ms > 10000 THEN 'medium'
+            ELSE 'low'
+        END;
+        description := 'A checkpoint occurred during this time window';
+        metric_value := format('write_time: %s ms, sync_time: %s ms',
+                              round(v_cmp.ckpt_write_time_ms::numeric, 1),
+                              round(v_cmp.ckpt_sync_time_ms::numeric, 1));
+        threshold := 'Any checkpoint';
+        recommendation := 'Consider increasing max_wal_size or scheduling heavy writes after checkpoint_timeout';
+        RETURN NEXT;
+    END IF;
+
+    -- Check 2: Forced checkpoint (ckpt_requested)
+    IF v_cmp.ckpt_requested_delta > 0 THEN
+        anomaly_type := 'FORCED_CHECKPOINT';
+        severity := 'high';
+        description := 'WAL exceeded max_wal_size, forcing checkpoint';
+        metric_value := format('%s forced checkpoints', v_cmp.ckpt_requested_delta);
+        threshold := 'ckpt_requested_delta > 0';
+        recommendation := 'Increase max_wal_size to prevent mid-batch checkpoints';
+        RETURN NEXT;
+    END IF;
+
+    -- Check 3: Backend buffer writes (shared_buffers pressure)
+    IF COALESCE(v_cmp.bgw_buffers_backend_delta, 0) > 0 THEN
+        anomaly_type := 'BUFFER_PRESSURE';
+        severity := CASE
+            WHEN v_cmp.bgw_buffers_backend_delta > 1000 THEN 'high'
+            WHEN v_cmp.bgw_buffers_backend_delta > 100 THEN 'medium'
+            ELSE 'low'
+        END;
+        description := 'Backends forced to write buffers directly (shared_buffers exhaustion)';
+        metric_value := format('%s backend buffer writes', v_cmp.bgw_buffers_backend_delta);
+        threshold := 'bgw_buffers_backend_delta > 0';
+        recommendation := 'Increase shared_buffers, reduce concurrent writers, or use faster storage';
+        RETURN NEXT;
+    END IF;
+
+    -- Check 4: Backend fsync (very bad)
+    IF COALESCE(v_cmp.bgw_buffers_backend_fsync_delta, 0) > 0 THEN
+        anomaly_type := 'BACKEND_FSYNC';
+        severity := 'high';
+        description := 'Backends forced to perform fsync (severe I/O bottleneck)';
+        metric_value := format('%s backend fsyncs', v_cmp.bgw_buffers_backend_fsync_delta);
+        threshold := 'bgw_buffers_backend_fsync_delta > 0';
+        recommendation := 'Urgent: increase shared_buffers, reduce write load, or upgrade storage';
+        RETURN NEXT;
+    END IF;
+
+    -- Check 5: Temp file spills
+    IF COALESCE(v_cmp.temp_files_delta, 0) > 0 THEN
+        anomaly_type := 'TEMP_FILE_SPILLS';
+        severity := CASE
+            WHEN v_cmp.temp_bytes_delta > 1073741824 THEN 'high'
+            WHEN v_cmp.temp_bytes_delta > 104857600 THEN 'medium'
+            ELSE 'low'
+        END;
+        description := 'Queries spilling to temp files (work_mem exhaustion)';
+        metric_value := format('%s temp files, %s written',
+                              v_cmp.temp_files_delta, v_cmp.temp_bytes_pretty);
+        threshold := 'temp_files_delta > 0';
+        recommendation := 'Increase work_mem for affected sessions or globally';
+        RETURN NEXT;
+    END IF;
+
+    -- Check 6: Lock contention
+    SELECT count(DISTINCT blocked_pid), max(blocked_duration)
+    INTO v_lock_count, v_max_block_duration
+    FROM telemetry.lock_samples l
+    JOIN telemetry.samples s ON s.id = l.sample_id
+    WHERE s.captured_at BETWEEN p_start_time AND p_end_time;
+
+    IF v_lock_count > 0 THEN
+        anomaly_type := 'LOCK_CONTENTION';
+        severity := CASE
+            WHEN v_max_block_duration > interval '30 seconds' THEN 'high'
+            WHEN v_max_block_duration > interval '5 seconds' THEN 'medium'
+            ELSE 'low'
+        END;
+        description := 'Lock contention detected';
+        metric_value := format('%s blocked sessions, max duration: %s',
+                              v_lock_count, v_max_block_duration);
+        threshold := 'Any lock contention';
+        recommendation := 'Check recent_locks for blocking queries; consider shorter transactions';
+        RETURN NEXT;
+    END IF;
+
+    RETURN;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- telemetry.summary_report() - Comprehensive diagnostic summary
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry.summary_report(
+    p_start_time TIMESTAMPTZ,
+    p_end_time TIMESTAMPTZ
+)
+RETURNS TABLE(
+    section             TEXT,
+    metric              TEXT,
+    value               TEXT,
+    interpretation      TEXT
+)
+LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    v_cmp RECORD;
+    v_sample_count INTEGER;
+    v_anomaly_count INTEGER;
+    v_top_wait RECORD;
+    v_lock_summary RECORD;
+BEGIN
+    -- Get comparison data
+    SELECT * INTO v_cmp FROM telemetry.compare(p_start_time, p_end_time);
+
+    SELECT count(*) INTO v_sample_count
+    FROM telemetry.samples WHERE captured_at BETWEEN p_start_time AND p_end_time;
+
+    SELECT count(*) INTO v_anomaly_count
+    FROM telemetry.anomaly_report(p_start_time, p_end_time);
+
+    -- === OVERVIEW SECTION ===
+    section := 'OVERVIEW';
+
+    metric := 'Time Window';
+    value := format('%s to %s', p_start_time, p_end_time);
+    interpretation := format('%s seconds elapsed', round(COALESCE(v_cmp.elapsed_seconds, 0), 1));
+    RETURN NEXT;
+
+    metric := 'Data Coverage';
+    value := format('%s snapshots, %s samples',
+                   (SELECT count(*) FROM telemetry.snapshots
+                    WHERE captured_at BETWEEN p_start_time AND p_end_time),
+                   v_sample_count);
+    interpretation := CASE
+        WHEN v_sample_count = 0 THEN 'WARNING: No sample data in window'
+        ELSE 'OK'
+    END;
+    RETURN NEXT;
+
+    metric := 'Anomalies Detected';
+    value := v_anomaly_count::text;
+    interpretation := CASE
+        WHEN v_anomaly_count = 0 THEN 'No issues detected'
+        WHEN v_anomaly_count <= 2 THEN 'Minor issues'
+        ELSE 'Multiple issues - review anomaly_report()'
+    END;
+    RETURN NEXT;
+
+    -- === CHECKPOINT/WAL SECTION ===
+    section := 'CHECKPOINT & WAL';
+
+    metric := 'Checkpoint Occurred';
+    value := COALESCE(v_cmp.checkpoint_occurred::text, 'unknown');
+    interpretation := CASE
+        WHEN v_cmp.checkpoint_occurred THEN
+            format('Checkpoint write: %s ms', round(COALESCE(v_cmp.ckpt_write_time_ms, 0)::numeric, 1))
+        ELSE 'No checkpoint during window'
+    END;
+    RETURN NEXT;
+
+    metric := 'WAL Generated';
+    value := COALESCE(v_cmp.wal_bytes_pretty, 'N/A');
+    interpretation := format('%s MB/sec',
+                            round((COALESCE(v_cmp.wal_bytes_delta, 0) / 1048576.0) / NULLIF(v_cmp.elapsed_seconds, 0), 2));
+    RETURN NEXT;
+
+    -- === BUFFER SECTION ===
+    section := 'BUFFERS & I/O';
+
+    metric := 'Buffers Allocated';
+    value := COALESCE(v_cmp.bgw_buffers_alloc_delta::text, 'N/A');
+    interpretation := 'New buffer allocations';
+    RETURN NEXT;
+
+    metric := 'Backend Buffer Writes';
+    value := COALESCE(v_cmp.bgw_buffers_backend_delta::text, 'N/A');
+    interpretation := CASE
+        WHEN COALESCE(v_cmp.bgw_buffers_backend_delta, 0) > 0 THEN 'WARNING: Backends writing directly'
+        ELSE 'OK'
+    END;
+    RETURN NEXT;
+
+    metric := 'Temp File Spills';
+    value := format('%s files, %s', COALESCE(v_cmp.temp_files_delta, 0), COALESCE(v_cmp.temp_bytes_pretty, '0 B'));
+    interpretation := CASE
+        WHEN COALESCE(v_cmp.temp_files_delta, 0) > 0 THEN 'Consider increasing work_mem'
+        ELSE 'No temp file usage'
+    END;
+    RETURN NEXT;
+
+    -- === WAIT EVENTS SECTION ===
+    section := 'WAIT EVENTS';
+
+    FOR v_top_wait IN
+        SELECT wait_event_type || ':' || wait_event AS we, total_waiters, pct_of_samples
+        FROM telemetry.wait_summary(p_start_time, p_end_time)
+        LIMIT 5
+    LOOP
+        metric := v_top_wait.we;
+        value := format('%s total waiters (%s%% of samples)',
+                       v_top_wait.total_waiters, v_top_wait.pct_of_samples);
+        interpretation := CASE
+            WHEN v_top_wait.we LIKE 'Lock:%' THEN 'Lock contention'
+            WHEN v_top_wait.we LIKE 'LWLock:Buffer%' THEN 'Buffer contention'
+            WHEN v_top_wait.we LIKE 'LWLock:WAL%' THEN 'WAL contention'
+            WHEN v_top_wait.we LIKE 'IO:%' THEN 'I/O bound'
+            WHEN v_top_wait.we = 'Running:CPU' THEN 'CPU active (normal)'
+            ELSE 'Review PostgreSQL docs'
+        END;
+        RETURN NEXT;
+    END LOOP;
+
+    -- === LOCK SECTION ===
+    section := 'LOCK CONTENTION';
+
+    SELECT
+        count(DISTINCT blocked_pid) AS blocked_count,
+        max(blocked_duration) AS max_duration
+    INTO v_lock_summary
+    FROM telemetry.lock_samples l
+    JOIN telemetry.samples s ON s.id = l.sample_id
+    WHERE s.captured_at BETWEEN p_start_time AND p_end_time;
+
+    metric := 'Blocked Sessions';
+    value := COALESCE(v_lock_summary.blocked_count, 0)::text;
+    interpretation := CASE
+        WHEN COALESCE(v_lock_summary.blocked_count, 0) = 0 THEN 'No lock contention'
+        ELSE format('Max blocked duration: %s', v_lock_summary.max_duration)
+    END;
+    RETURN NEXT;
+
+    RETURN;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- telemetry.set_mode() - Configure telemetry collection mode
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry.set_mode(p_mode TEXT)
+RETURNS TEXT
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_interval TEXT;
+    v_enable_locks BOOLEAN;
+    v_enable_progress BOOLEAN;
+    v_description TEXT;
+    v_pgcron_version TEXT;
+    v_supports_subsecond BOOLEAN := FALSE;
+BEGIN
+    -- Validate mode
+    IF p_mode NOT IN ('normal', 'light', 'emergency') THEN
+        RAISE EXCEPTION 'Invalid mode: %. Must be normal, light, or emergency.', p_mode;
+    END IF;
+
+    -- Set mode-specific configuration
+    CASE p_mode
+        WHEN 'normal' THEN
+            v_interval := '30 seconds';
+            v_enable_locks := TRUE;
+            v_enable_progress := TRUE;
+            v_description := 'Normal mode: 30s sampling, all collectors enabled';
+        WHEN 'light' THEN
+            v_interval := '60 seconds';
+            v_enable_locks := TRUE;
+            v_enable_progress := FALSE;
+            v_description := 'Light mode: 60s sampling, progress tracking disabled';
+        WHEN 'emergency' THEN
+            v_interval := '120 seconds';
+            v_enable_locks := FALSE;
+            v_enable_progress := FALSE;
+            v_description := 'Emergency mode: 120s sampling, locks and progress disabled';
+    END CASE;
+
+    -- Update configuration
+    INSERT INTO telemetry.config (key, value, updated_at)
+    VALUES ('mode', p_mode, now())
+    ON CONFLICT (key) DO UPDATE SET value = p_mode, updated_at = now();
+
+    INSERT INTO telemetry.config (key, value, updated_at)
+    VALUES ('enable_locks', v_enable_locks::text, now())
+    ON CONFLICT (key) DO UPDATE SET value = v_enable_locks::text, updated_at = now();
+
+    INSERT INTO telemetry.config (key, value, updated_at)
+    VALUES ('enable_progress', v_enable_progress::text, now())
+    ON CONFLICT (key) DO UPDATE SET value = v_enable_progress::text, updated_at = now();
+
+    -- Reschedule pg_cron job (if pg_cron available)
+    BEGIN
+        SELECT extversion INTO v_pgcron_version FROM pg_extension WHERE extname = 'pg_cron';
+
+        IF v_pgcron_version IS NOT NULL THEN
+            v_pgcron_version := split_part(v_pgcron_version, '-', 1);
+            v_supports_subsecond := (
+                split_part(v_pgcron_version, '.', 1)::int > 1 OR
+                (split_part(v_pgcron_version, '.', 1)::int = 1 AND
+                 split_part(v_pgcron_version, '.', 2)::int > 4) OR
+                (split_part(v_pgcron_version, '.', 1)::int = 1 AND
+                 split_part(v_pgcron_version, '.', 2)::int = 4 AND
+                 COALESCE(NULLIF(split_part(v_pgcron_version, '.', 3), '')::int, 0) >= 1)
+            );
+
+            -- Unschedule existing
+            PERFORM cron.unschedule('telemetry_sample');
+
+            IF v_supports_subsecond THEN
+                PERFORM cron.schedule('telemetry_sample', v_interval, 'SELECT telemetry.sample()');
+            ELSE
+                -- Fallback: minute-level schedules
+                IF p_mode = 'emergency' THEN
+                    PERFORM cron.schedule('telemetry_sample', '*/2 * * * *', 'SELECT telemetry.sample()');
+                ELSE
+                    PERFORM cron.schedule('telemetry_sample', '* * * * *', 'SELECT telemetry.sample()');
+                END IF;
+            END IF;
+        END IF;
+    EXCEPTION
+        WHEN undefined_table THEN NULL;
+        WHEN undefined_function THEN NULL;
+    END;
+
+    RETURN v_description;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- telemetry.get_mode() - Show current telemetry configuration
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry.get_mode()
+RETURNS TABLE(
+    mode                TEXT,
+    sample_interval     TEXT,
+    locks_enabled       BOOLEAN,
+    progress_enabled    BOOLEAN,
+    statements_enabled  TEXT
+)
+LANGUAGE sql STABLE AS $$
+    SELECT
+        telemetry._get_config('mode', 'normal') AS mode,
+        CASE telemetry._get_config('mode', 'normal')
+            WHEN 'normal' THEN '30 seconds'
+            WHEN 'light' THEN '60 seconds'
+            WHEN 'emergency' THEN '120 seconds'
+            ELSE 'unknown'
+        END AS sample_interval,
+        COALESCE(telemetry._get_config('enable_locks', 'true')::boolean, true) AS locks_enabled,
+        COALESCE(telemetry._get_config('enable_progress', 'true')::boolean, true) AS progress_enabled,
+        telemetry._get_config('statements_enabled', 'auto') AS statements_enabled
 $$;
 
 -- -----------------------------------------------------------------------------
