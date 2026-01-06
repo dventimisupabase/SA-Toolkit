@@ -6,7 +6,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(96);  -- Total number of tests (73 + 15 P0 + 7 P1 + 1 function existence = 96)
+SELECT plan(108);  -- Total number of tests (73 + 15 P0 + 8 P1 + 12 P2 = 108)
 
 -- =============================================================================
 -- 1. INSTALLATION VERIFICATION (16 tests)
@@ -499,6 +499,76 @@ SELECT lives_ok(
 SELECT ok(
     (SELECT vacuumed_tables FROM telemetry.cleanup('1 day')) >= 0,
     'P1 Safety: cleanup() should return vacuum count'
+);
+
+-- =============================================================================
+-- 10. P2 SAFETY FEATURES (12 tests)
+-- =============================================================================
+
+-- Test P2: Automatic mode switching function exists
+SELECT has_function(
+    'telemetry', '_check_and_adjust_mode',
+    'P2: Function telemetry._check_and_adjust_mode should exist'
+);
+
+-- Test P2: Auto mode config entries exist
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.config WHERE key = 'auto_mode_enabled'),
+    'P2: Auto mode enabled config should exist'
+);
+
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.config WHERE key = 'auto_mode_connections_threshold'),
+    'P2: Auto mode connections threshold config should exist'
+);
+
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.config WHERE key = 'auto_mode_trips_threshold'),
+    'P2: Auto mode trips threshold config should exist'
+);
+
+-- Test P2: Auto mode defaults to disabled
+SELECT ok(
+    (SELECT value FROM telemetry.config WHERE key = 'auto_mode_enabled') = 'false',
+    'P2: Auto mode should be disabled by default'
+);
+
+-- Test P2: Configurable retention config entries exist
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.config WHERE key = 'retention_samples_days'),
+    'P2: Samples retention config should exist'
+);
+
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.config WHERE key = 'retention_snapshots_days'),
+    'P2: Snapshots retention config should exist'
+);
+
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.config WHERE key = 'retention_statements_days'),
+    'P2: Statements retention config should exist'
+);
+
+-- Test P2: cleanup() now returns 4 columns (added deleted_statements)
+SELECT lives_ok(
+    $$SELECT deleted_snapshots, deleted_samples, deleted_statements, vacuumed_tables FROM telemetry.cleanup()$$,
+    'P2: cleanup() should return 4 columns with configurable retention'
+);
+
+-- Test P2: Partition management functions exist
+SELECT has_function(
+    'telemetry', 'create_next_partition',
+    'P2: Function telemetry.create_next_partition should exist'
+);
+
+SELECT has_function(
+    'telemetry', 'drop_old_partitions',
+    'P2: Function telemetry.drop_old_partitions should exist'
+);
+
+SELECT has_function(
+    'telemetry', 'partition_status',
+    'P2: Function telemetry.partition_status should exist'
 );
 
 SELECT * FROM finish();

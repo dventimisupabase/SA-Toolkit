@@ -257,6 +257,78 @@ SELECT * FROM telemetry.cleanup('7 days');
 - Prevents table bloat over time
 - Each table vacuumed independently with exception handling
 
+### 8. Automatic Mode Switching (P2)
+
+Monitors system health and auto-adjusts collection mode based on load indicators:
+
+```sql
+-- Enable automatic mode switching
+UPDATE telemetry.config SET value = 'true' WHERE key = 'auto_mode_enabled';
+
+-- Configure thresholds
+UPDATE telemetry.config SET value = '80' WHERE key = 'auto_mode_connections_threshold';
+UPDATE telemetry.config SET value = '3' WHERE key = 'auto_mode_trips_threshold';
+```
+
+**How it works:**
+- Checks system indicators every sample collection (30s-2min depending on mode)
+- **Normal → Light**: When active connections ≥80% of max_connections
+- **Light/Normal → Emergency**: When circuit breaker trips ≥3 times in 10 minutes
+- **Emergency → Light**: When no circuit breaker trips for 10 minutes
+- **Light → Normal**: When connections drop below 70% of threshold
+- Mode changes logged via PostgreSQL NOTICE
+
+**Why use it:**
+- Reduces telemetry overhead automatically during high load
+- Prevents telemetry from contributing to cascading failures
+- Auto-recovers to normal monitoring when system stabilizes
+
+### 9. Configurable Retention by Table Type (P2)
+
+Different retention periods for different data types:
+
+```sql
+-- Configure retention (days)
+UPDATE telemetry.config SET value = '7' WHERE key = 'retention_samples_days';      -- High frequency
+UPDATE telemetry.config SET value = '30' WHERE key = 'retention_snapshots_days';   -- Cumulative stats
+UPDATE telemetry.config SET value = '30' WHERE key = 'retention_statements_days';  -- Query stats
+
+-- Cleanup uses configured retention (new default behavior)
+SELECT * FROM telemetry.cleanup();
+-- Returns: deleted_snapshots, deleted_samples, deleted_statements, vacuumed_tables
+
+-- Legacy: Specify retention explicitly (overrides config)
+SELECT * FROM telemetry.cleanup('7 days');
+```
+
+**Benefits:**
+- Keep cumulative stats longer than high-frequency samples
+- Balance disk usage with diagnostic capabilities
+- Samples (every 30s) default to 7 days, snapshots (every 5min) default to 30 days
+
+### 10. Partition Management Helpers (P2)
+
+Optional functions for time-based partitioning (advanced use case):
+
+```sql
+-- Check current partition status
+SELECT * FROM telemetry.partition_status();
+
+-- Create next partition (if using partitioned tables)
+SELECT telemetry.create_next_partition('samples', 'day');
+SELECT telemetry.create_next_partition('snapshots', 'week');
+
+-- Drop old partitions (faster than DELETE)
+SELECT * FROM telemetry.drop_old_partitions('samples', '7 days');
+```
+
+**When to use:**
+- Very high volume installations (thousands of samples/day)
+- Need faster cleanup operations (DROP PARTITION vs DELETE)
+- Want partition-level backup/restore capabilities
+
+**Note:** Converting existing tables to partitioned requires data migration. These functions are for new installs or users who have already migrated to partitioned tables.
+
 ## Anomaly Detection
 
 Automatically detects 6 common issues:
@@ -301,7 +373,7 @@ The test suite uses [pgTAP](https://pgtap.org/) via `supabase test db`.
 # Ensure local Supabase is running
 supabase start
 
-# Run all tests (96 tests)
+# Run all tests (108 tests)
 supabase test db
 ```
 
@@ -312,7 +384,7 @@ supabase test db
 | Category | Tests | Description |
 |----------|-------|-------------|
 | Installation Verification | 16 | Schema, 12 tables, 7 views |
-| Function Existence | 24 | All functions including P0/P1 safety helpers |
+| Function Existence | 24 | All functions including P0/P1/P2 safety helpers |
 | Core Functionality | 10 | snapshot(), sample(), config |
 | Table Tracking | 5 | track/untrack/list operations |
 | Analysis Functions | 8 | compare(), wait_summary(), anomaly_report(), etc. |
@@ -320,7 +392,8 @@ supabase test db
 | Views | 5 | All views queryable |
 | Kill Switch | 6 | disable(), enable() |
 | P0 Safety Features | 10 | Circuit breaker, exception handling, stats tracking |
-| P1 Safety Features | 7 | Schema size monitoring, optimized queries, post-cleanup VACUUM |
+| P1 Safety Features | 8 | Schema size monitoring, optimized queries, post-cleanup VACUUM |
+| P2 Safety Features | 12 | Auto mode switching, configurable retention, partition helpers |
 
 ## Standalone Installation (Non-Supabase)
 

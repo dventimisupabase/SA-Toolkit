@@ -612,7 +612,15 @@ INSERT INTO telemetry.config (key, value) VALUES
     ('circuit_breaker_enabled', 'true'),
     ('schema_size_warning_mb', '5000'),        -- Warn when schema exceeds 5GB
     ('schema_size_critical_mb', '10000'),      -- Auto-disable when schema exceeds 10GB
-    ('schema_size_check_enabled', 'true')
+    ('schema_size_check_enabled', 'true'),
+    -- P2: Automatic mode switching
+    ('auto_mode_enabled', 'false'),            -- Auto-adjust mode based on system load
+    ('auto_mode_connections_threshold', '80'), -- Switch to light if active connections >= this
+    ('auto_mode_trips_threshold', '3'),        -- Switch to emergency if circuit breaker tripped N times in 10min
+    -- P2: Configurable retention by table type
+    ('retention_samples_days', '7'),           -- Retention for samples table
+    ('retention_snapshots_days', '30'),        -- Retention for snapshots table
+    ('retention_statements_days', '30')        -- Retention for pg_stat_statements snapshots
 ON CONFLICT (key) DO NOTHING;
 
 -- -----------------------------------------------------------------------------
@@ -742,6 +750,116 @@ LANGUAGE sql STABLE AS $$
         (SELECT value FROM telemetry.config WHERE key = p_key),
         p_default
     )
+$$;
+
+-- -----------------------------------------------------------------------------
+-- P2: Helper: Automatic mode switching based on system load
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry._check_and_adjust_mode()
+RETURNS TABLE(
+    previous_mode TEXT,
+    new_mode TEXT,
+    reason TEXT,
+    action_taken BOOLEAN
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_enabled BOOLEAN;
+    v_current_mode TEXT;
+    v_connections_threshold INTEGER;
+    v_trips_threshold INTEGER;
+    v_active_connections INTEGER;
+    v_recent_trips INTEGER;
+    v_max_connections INTEGER;
+    v_connection_pct NUMERIC;
+    v_suggested_mode TEXT;
+    v_reason TEXT;
+BEGIN
+    -- Check if automatic mode switching is enabled
+    v_enabled := COALESCE(
+        telemetry._get_config('auto_mode_enabled', 'false')::boolean,
+        false
+    );
+
+    IF NOT v_enabled THEN
+        RETURN;  -- Return empty result set
+    END IF;
+
+    -- Get current mode and thresholds
+    v_current_mode := telemetry._get_config('mode', 'normal');
+    v_connections_threshold := COALESCE(
+        telemetry._get_config('auto_mode_connections_threshold', '80')::integer,
+        80
+    );
+    v_trips_threshold := COALESCE(
+        telemetry._get_config('auto_mode_trips_threshold', '3')::integer,
+        3
+    );
+
+    -- Check system indicators
+    -- 1. Active connections as percentage of max_connections
+    SELECT count(*) FILTER (WHERE state = 'active')
+    INTO v_active_connections
+    FROM pg_stat_activity
+    WHERE backend_type = 'client backend';
+
+    SELECT setting::integer
+    INTO v_max_connections
+    FROM pg_settings
+    WHERE name = 'max_connections';
+
+    v_connection_pct := (v_active_connections::numeric / NULLIF(v_max_connections, 0)) * 100;
+
+    -- 2. Recent circuit breaker trips (last 10 minutes)
+    SELECT count(*)
+    INTO v_recent_trips
+    FROM telemetry.collection_stats
+    WHERE skipped = true
+      AND started_at > now() - interval '10 minutes'
+      AND skipped_reason LIKE '%Circuit breaker%';
+
+    -- Determine suggested mode based on indicators
+    v_suggested_mode := v_current_mode;  -- Default: no change
+
+    IF v_recent_trips >= v_trips_threshold THEN
+        -- Multiple circuit breaker trips = system under severe stress
+        v_suggested_mode := 'emergency';
+        v_reason := format('Circuit breaker tripped %s times in last 10 minutes (threshold: %s)',
+                          v_recent_trips, v_trips_threshold);
+    ELSIF v_connection_pct >= v_connections_threshold THEN
+        -- High connection utilization
+        IF v_current_mode = 'normal' THEN
+            v_suggested_mode := 'light';
+            v_reason := format('Active connections at %.1f%% of max (threshold: %s%%)',
+                              v_connection_pct, v_connections_threshold);
+        END IF;
+    ELSE
+        -- System looks healthy, consider downgrading mode
+        IF v_current_mode = 'emergency' AND v_recent_trips = 0 THEN
+            v_suggested_mode := 'light';
+            v_reason := 'System recovered: no recent circuit breaker trips';
+        ELSIF v_current_mode = 'light' AND v_connection_pct < (v_connections_threshold * 0.7) THEN
+            v_suggested_mode := 'normal';
+            v_reason := format('System load reduced: connections at %.1f%% (threshold: %s%%)',
+                              v_connection_pct, v_connections_threshold);
+        END IF;
+    END IF;
+
+    -- Apply mode change if suggested mode differs from current
+    IF v_suggested_mode != v_current_mode THEN
+        -- Use set_mode to apply the change (handles cron rescheduling)
+        PERFORM telemetry.set_mode(v_suggested_mode);
+
+        RAISE NOTICE 'pg-telemetry: Auto-mode switched from % to %: %',
+                     v_current_mode, v_suggested_mode, v_reason;
+
+        RETURN QUERY SELECT v_current_mode, v_suggested_mode, v_reason, true;
+    END IF;
+
+    -- No action taken
+    RETURN;
+END;
 $$;
 
 -- -----------------------------------------------------------------------------
@@ -912,6 +1030,9 @@ DECLARE
     v_stat_id INTEGER;
     v_should_skip BOOLEAN;
 BEGIN
+    -- P2 Safety: Check and adjust mode automatically based on system load
+    PERFORM telemetry._check_and_adjust_mode();
+
     -- P0 Safety: Check circuit breaker
     v_should_skip := telemetry._check_circuit_breaker('sample');
     IF v_should_skip THEN
@@ -2630,31 +2751,75 @@ $$;
 -- telemetry.cleanup() - Remove old telemetry data
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry.cleanup(p_retain_interval INTERVAL DEFAULT '7 days')
+CREATE OR REPLACE FUNCTION telemetry.cleanup(p_retain_interval INTERVAL DEFAULT NULL)
 RETURNS TABLE(
     deleted_snapshots   BIGINT,
     deleted_samples     BIGINT,
+    deleted_statements  BIGINT,
     vacuumed_tables     INTEGER
 )
 LANGUAGE plpgsql AS $$
 DECLARE
     v_deleted_snapshots BIGINT;
     v_deleted_samples BIGINT;
+    v_deleted_statements BIGINT;
     v_vacuumed_count INTEGER := 0;
     v_table_name TEXT;
-    v_cutoff TIMESTAMPTZ := now() - p_retain_interval;
+    v_samples_retention_days INTEGER;
+    v_snapshots_retention_days INTEGER;
+    v_statements_retention_days INTEGER;
+    v_samples_cutoff TIMESTAMPTZ;
+    v_snapshots_cutoff TIMESTAMPTZ;
+    v_statements_cutoff TIMESTAMPTZ;
 BEGIN
+    -- P2: Get retention periods from config (or use p_retain_interval for backward compatibility)
+    IF p_retain_interval IS NOT NULL THEN
+        -- Legacy mode: use provided interval for all tables
+        v_samples_cutoff := now() - p_retain_interval;
+        v_snapshots_cutoff := now() - p_retain_interval;
+        v_statements_cutoff := now() - p_retain_interval;
+    ELSE
+        -- P2: Use configurable retention per table type
+        v_samples_retention_days := COALESCE(
+            telemetry._get_config('retention_samples_days', '7')::integer,
+            7
+        );
+        v_snapshots_retention_days := COALESCE(
+            telemetry._get_config('retention_snapshots_days', '30')::integer,
+            30
+        );
+        v_statements_retention_days := COALESCE(
+            telemetry._get_config('retention_statements_days', '30')::integer,
+            30
+        );
+
+        v_samples_cutoff := now() - (v_samples_retention_days || ' days')::interval;
+        v_snapshots_cutoff := now() - (v_snapshots_retention_days || ' days')::interval;
+        v_statements_cutoff := now() - (v_statements_retention_days || ' days')::interval;
+    END IF;
+
     -- Delete old samples (cascades to wait_samples, activity_samples, progress_samples, lock_samples)
     WITH deleted AS (
-        DELETE FROM telemetry.samples WHERE captured_at < v_cutoff RETURNING 1
+        DELETE FROM telemetry.samples WHERE captured_at < v_samples_cutoff RETURNING 1
     )
     SELECT count(*) INTO v_deleted_samples FROM deleted;
 
     -- Delete old snapshots (cascades to table_snapshots, replication_snapshots)
     WITH deleted AS (
-        DELETE FROM telemetry.snapshots WHERE captured_at < v_cutoff RETURNING 1
+        DELETE FROM telemetry.snapshots WHERE captured_at < v_snapshots_cutoff RETURNING 1
     )
     SELECT count(*) INTO v_deleted_snapshots FROM deleted;
+
+    -- P2: Delete old pg_stat_statements snapshots with configurable retention
+    -- statement_snapshots references snapshots(id), so delete based on snapshot's captured_at
+    WITH deleted AS (
+        DELETE FROM telemetry.statement_snapshots
+        WHERE snapshot_id IN (
+            SELECT id FROM telemetry.snapshots WHERE captured_at < v_statements_cutoff
+        )
+        RETURNING 1
+    )
+    SELECT count(*) INTO v_deleted_statements FROM deleted;
 
     -- P1 Safety: VACUUM ANALYZE after cleanup to reclaim space and update stats
     -- This prevents bloat in telemetry tables and keeps query planner informed
@@ -2679,7 +2844,7 @@ BEGIN
         END;
     END LOOP;
 
-    RETURN QUERY SELECT v_deleted_snapshots, v_deleted_samples, v_vacuumed_count;
+    RETURN QUERY SELECT v_deleted_snapshots, v_deleted_samples, v_deleted_statements, v_vacuumed_count;
 END;
 $$;
 
@@ -2878,6 +3043,176 @@ EXCEPTION
         RAISE NOTICE 'pg_cron extension not found. Automatic scheduling disabled. Run telemetry.snapshot() and telemetry.sample() manually or via external scheduler.';
     WHEN undefined_function THEN
         RAISE NOTICE 'pg_cron extension not found. Automatic scheduling disabled. Run telemetry.snapshot() and telemetry.sample() manually or via external scheduler.';
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- P2: Partition Management Helpers (Optional)
+-- -----------------------------------------------------------------------------
+-- These functions help set up time-based partitioning for samples and snapshots
+-- tables. Partitioning improves performance and makes cleanup faster (DROP vs DELETE).
+--
+-- WARNING: Converting existing tables to partitioned tables requires data migration.
+-- Only use these functions on NEW installs or follow proper migration procedure.
+-- -----------------------------------------------------------------------------
+
+-- P2: Create next time-based partition for samples or snapshots
+CREATE OR REPLACE FUNCTION telemetry.create_next_partition(
+    p_table_name TEXT,  -- 'samples' or 'snapshots'
+    p_partition_interval TEXT DEFAULT 'day'  -- 'day' or 'week'
+)
+RETURNS TEXT
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_next_date DATE;
+    v_partition_name TEXT;
+    v_from_date DATE;
+    v_to_date DATE;
+BEGIN
+    -- Validate table name
+    IF p_table_name NOT IN ('samples', 'snapshots') THEN
+        RAISE EXCEPTION 'Invalid table name: %. Must be ''samples'' or ''snapshots''', p_table_name;
+    END IF;
+
+    -- Validate interval
+    IF p_partition_interval NOT IN ('day', 'week') THEN
+        RAISE EXCEPTION 'Invalid partition interval: %. Must be ''day'' or ''week''', p_partition_interval;
+    END IF;
+
+    -- Calculate next partition dates
+    v_next_date := CURRENT_DATE + interval '1 day';
+
+    IF p_partition_interval = 'day' THEN
+        v_from_date := v_next_date;
+        v_to_date := v_next_date + interval '1 day';
+        v_partition_name := format('telemetry.%s_%s', p_table_name, to_char(v_from_date, 'YYYYMMDD'));
+    ELSE  -- week
+        v_from_date := date_trunc('week', v_next_date + interval '1 week')::date;
+        v_to_date := v_from_date + interval '1 week';
+        v_partition_name := format('telemetry.%s_%s', p_table_name, to_char(v_from_date, 'YYYYMMDD'));
+    END IF;
+
+    -- Create partition
+    EXECUTE format(
+        'CREATE TABLE IF NOT EXISTS %s PARTITION OF telemetry.%I FOR VALUES FROM (%L) TO (%L)',
+        v_partition_name, p_table_name, v_from_date, v_to_date
+    );
+
+    RETURN format('Created partition %s for dates %s to %s', v_partition_name, v_from_date, v_to_date);
+END;
+$$;
+
+-- P2: Drop old partitions (faster than DELETE for cleanup)
+CREATE OR REPLACE FUNCTION telemetry.drop_old_partitions(
+    p_table_name TEXT,  -- 'samples' or 'snapshots'
+    p_retain_interval INTERVAL DEFAULT '7 days'
+)
+RETURNS TABLE(
+    partition_name TEXT,
+    dropped BOOLEAN
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_cutoff_date DATE;
+    v_partition_record RECORD;
+    v_partition_date DATE;
+BEGIN
+    -- Validate table name
+    IF p_table_name NOT IN ('samples', 'snapshots') THEN
+        RAISE EXCEPTION 'Invalid table name: %. Must be ''samples'' or ''snapshots''', p_table_name;
+    END IF;
+
+    v_cutoff_date := (now() - p_retain_interval)::date;
+
+    -- Find and drop old partitions
+    FOR v_partition_record IN
+        SELECT
+            c.relname,
+            pg_get_expr(c.relpartbound, c.oid) as partition_bound
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_inherits i ON i.inhrelid = c.oid
+        JOIN pg_class p ON p.oid = i.inhparent
+        WHERE n.nspname = 'telemetry'
+          AND p.relname = p_table_name
+          AND c.relkind = 'r'
+    LOOP
+        -- Extract date from partition name (format: tablename_YYYYMMDD)
+        BEGIN
+            v_partition_date := to_date(
+                substring(v_partition_record.relname from '[0-9]{8}$'),
+                'YYYYMMDD'
+            );
+
+            IF v_partition_date < v_cutoff_date THEN
+                EXECUTE format('DROP TABLE IF EXISTS telemetry.%I', v_partition_record.relname);
+                RETURN QUERY SELECT v_partition_record.relname::text, true;
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            -- Skip partitions that don't match naming convention
+            CONTINUE;
+        END;
+    END LOOP;
+END;
+$$;
+
+-- P2: Check partition status and provide recommendations
+CREATE OR REPLACE FUNCTION telemetry.partition_status()
+RETURNS TABLE(
+    table_name TEXT,
+    is_partitioned BOOLEAN,
+    partition_count INTEGER,
+    oldest_partition TEXT,
+    newest_partition TEXT,
+    recommendation TEXT
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY
+    WITH partition_info AS (
+        SELECT
+            p.relname as parent_table,
+            c.relname as partition_name,
+            pg_get_expr(c.relpartbound, c.oid) as partition_bound
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_inherits i ON i.inhrelid = c.oid
+        JOIN pg_class p ON p.oid = i.inhparent
+        WHERE n.nspname = 'telemetry'
+          AND p.relname IN ('samples', 'snapshots')
+          AND c.relkind = 'r'
+    )
+    SELECT
+        t.table_name::text,
+        (EXISTS (
+            SELECT 1 FROM pg_partitioned_table pt
+            JOIN pg_class c ON c.oid = pt.partrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'telemetry' AND c.relname = t.table_name
+        )) as is_partitioned,
+        COALESCE(pi.cnt, 0)::integer as partition_count,
+        pi.oldest::text,
+        pi.newest::text,
+        CASE
+            WHEN NOT (EXISTS (
+                SELECT 1 FROM pg_partitioned_table pt
+                JOIN pg_class c ON c.oid = pt.partrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'telemetry' AND c.relname = t.table_name
+            )) THEN 'Table not partitioned. See documentation for migration procedure.'
+            WHEN pi.cnt = 0 THEN 'No partitions found. Run create_next_partition().'
+            WHEN pi.cnt < 2 THEN 'Low partition count. Consider running create_next_partition().'
+            ELSE 'OK'
+        END::text as recommendation
+    FROM (VALUES ('samples'), ('snapshots')) AS t(table_name)
+    LEFT JOIN LATERAL (
+        SELECT
+            count(*) as cnt,
+            min(partition_name) as oldest,
+            max(partition_name) as newest
+        FROM partition_info
+        WHERE parent_table = t.table_name
+    ) pi ON true;
 END;
 $$;
 
