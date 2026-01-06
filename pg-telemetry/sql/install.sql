@@ -1,9 +1,9 @@
 -- =============================================================================
--- Batch Telemetry for PostgreSQL 15, 16, 17
+-- pg-telemetry: PostgreSQL Performance Telemetry
 -- =============================================================================
 --
--- Server-side telemetry for diagnosing batch job performance variance.
--- Answers: "Why did this batch take 60 minutes instead of 10?"
+-- Server-side telemetry for PostgreSQL performance diagnostics.
+-- Continuously collects metrics to answer: "What was happening during this time window?"
 --
 -- REQUIREMENTS
 -- ------------
@@ -37,17 +37,20 @@
 --
 -- QUICK START
 -- -----------
---   -- 1. Track your target table(s) before running the batch
+--   -- 1. Optionally track specific tables for detailed monitoring
 --   SELECT telemetry.track_table('orders');
---   SELECT telemetry.track_table('order_items');
 --
---   -- 2. Note the start time, run your batch job, note the end time
---   --    (telemetry collects automatically in the background)
+--   -- 2. Telemetry collects automatically in the background
 --
---   -- 3. Analyze the batch window
+--   -- 3. Query any time window to diagnose performance
 --   SELECT * FROM telemetry.compare('2024-12-16 14:00', '2024-12-16 15:00');
 --   SELECT * FROM telemetry.table_compare('orders', '2024-12-16 14:00', '2024-12-16 15:00');
 --   SELECT * FROM telemetry.wait_summary('2024-12-16 14:00', '2024-12-16 15:00');
+--
+--   -- 4. Or use the recent_* views for rolling 2-hour visibility
+--   SELECT * FROM telemetry.recent_waits;
+--   SELECT * FROM telemetry.recent_locks;
+--   SELECT * FROM telemetry.recent_activity;
 --
 -- FUNCTIONS
 -- ---------

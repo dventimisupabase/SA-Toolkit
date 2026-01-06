@@ -22,12 +22,12 @@ This is a Solutions Architect Toolkit---a collection of tools, scripts, and util
 
 * Tools
 
-** [[file:batch-telemetry/README.md][batch-telemetry]]
+** [[file:pg-telemetry/README.md][pg-telemetry]]
 
-Server-side batch telemetry for PostgreSQL 15, 16, or 17. Diagnoses batch job performance variance ("Why did this batch take 60 minutes instead of 10?"). Automatically collects metrics via ~pg_cron~ including WAL, checkpoints, wait events, lock contention, and more.
+Server-side performance telemetry for PostgreSQL 15, 16, or 17. Continuously collects metrics (WAL, checkpoints, wait events, locks, replication lag) via ~pg_cron~ and provides analysis functions to diagnose any time window.
 
 #+begin_src bash
-psql -f batch-telemetry/sql/install.sql
+psql -f pg-telemetry/sql/install.sql
 #+end_src
 
 ** [[file:multi-region-ha/README.md][multi-region-ha]]
@@ -69,7 +69,7 @@ Requirements vary by tool. See individual README files for specifics:
 
 | Tool | PostgreSQL | Extensions | Other |
 |------+------------+------------+-------|
-| batch-telemetry | 15, 16, 17 | pg_cron 1.4.1+ | - |
+| pg-telemetry | 15, 16, 17 | pg_cron 1.4.1+ | - |
 | multi-region-ha | 15+ | - | Fly.io, two Supabase projects |
 | storage-to-s3 | - | - | Supabase CLI, AWS CLI v2 |
 | enable-rls-automatically | 9.3+ | - | Superuser privileges |

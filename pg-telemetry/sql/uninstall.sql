@@ -1,5 +1,5 @@
 -- =============================================================================
--- Uninstall Batch Telemetry
+-- Uninstall pg-telemetry
 -- =============================================================================
 -- Removes all cron jobs and telemetry data/functions.
 -- Run with: psql -f uninstall.sql
