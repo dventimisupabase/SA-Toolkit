@@ -41,8 +41,28 @@ This tool provides ASH-like functionality using **only built-in PostgreSQL featu
 - PostgreSQL 15, 16, or 17
 - `pg_cron` extension (1.4.1+ recommended for 30-second sampling)
 - Superuser or appropriate privileges to create schema/functions
+- Supabase CLI (optional, for Supabase project workflow)
 
-## Quick Start
+## Deployment Methods
+
+### Option 1: Supabase Project (Recommended)
+
+Use the Supabase CLI for local testing with pgTAP tests and easy deployment:
+
+```bash
+# Local development
+supabase start          # Start local Supabase
+supabase db reset       # Apply migration
+supabase test db        # Run 67 pgTAP tests
+
+# Deploy to hosted project
+supabase link --project-ref <your-project-ref>
+supabase db push
+```
+
+### Option 2: Standalone Installation
+
+Direct installation on any PostgreSQL 15+ with pg_cron:
 
 ```bash
 # Install
