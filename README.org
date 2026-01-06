@@ -16,165 +16,64 @@
 
 #+STARTUP: indent
 
-* What
+* Overview
 
-This is a Solutions Architect Toolkit—a collection of tools for PostgreSQL diagnostics and troubleshooting.
-
-* Why
-
-When batch jobs exhibit variance (e.g., usually 10 minutes but sometimes 60 minutes), you need telemetry to answer: "Why did this batch take so long?"
+This is a Solutions Architect Toolkit---a collection of tools, scripts, and utilities for PostgreSQL diagnostics, troubleshooting, and migration tasks. While designed primarily for Supabase environments, most tools work with standard PostgreSQL installations.
 
 * Tools
 
-** batch-telemetry/sql/
+** [[file:batch-telemetry/README.md][batch-telemetry]]
 
-Server-side batch telemetry for PostgreSQL 15, 16, or 17. Automatically collects performance metrics via ~pg_cron~ to diagnose batch job variance.
-
-*** Requirements
-
-- PostgreSQL 15, 16, or 17
-- ~pg_cron~ extension (1.4.1+ recommended for 30-second sampling)
-
-*** Installation
+Server-side batch telemetry for PostgreSQL 15, 16, or 17. Diagnoses batch job performance variance ("Why did this batch take 60 minutes instead of 10?"). Automatically collects metrics via ~pg_cron~ including WAL, checkpoints, wait events, lock contention, and more.
 
 #+begin_src bash
 psql -f batch-telemetry/sql/install.sql
 #+end_src
 
-*** Uninstall
+** [[file:multi-region-ha/README.md][multi-region-ha]]
+
+Reference architecture for single-writer, multi-region disaster recovery for Supabase. Includes documentation, runbooks, and scripts for PgBouncer on Fly.io with controlled failover. Prioritizes data consistency over automatic failover (no split-brain).
+
+- RTO: 2-5 minutes (scripted) / 5-15 minutes (manual)
+- RPO: Seconds to minutes (replication lag dependent)
+
+** [[file:storage-to-s3/README.md][storage-to-s3]]
+
+One-time migration tool to move objects from Supabase Storage to AWS S3. Uses Supabase CLI for downloads and AWS CLI for uploads. Supports dry-run mode and verification.
 
 #+begin_src bash
-psql -f batch-telemetry/sql/uninstall.sql
+./storage-to-s3/scripts/migrate.sh --dry-run
+./storage-to-s3/scripts/migrate.sh
+./storage-to-s3/scripts/verify.sh
 #+end_src
 
-*** Quick Start
+** [[file:enable-rls-automatically/README.md][enable-rls-automatically]]
 
-#+begin_src sql
--- 1. Track your target table(s) before running the batch
-SELECT telemetry.track_table('orders');
+PostgreSQL event trigger that automatically enables Row Level Security (RLS) with FORCE option on all newly-created tables in the public schema. Includes pgTAP test suite.
 
--- 2. Run your batch job, note the start/end times
---    (telemetry collects automatically in the background)
-
--- 3. Analyze the batch window
-SELECT * FROM telemetry.compare('2024-12-16 14:00', '2024-12-16 15:00');
-SELECT * FROM telemetry.table_compare('orders', '2024-12-16 14:00', '2024-12-16 15:00');
-SELECT * FROM telemetry.wait_summary('2024-12-16 14:00', '2024-12-16 15:00');
+#+begin_src bash
+supabase db push  # Deploy to Supabase
+# or
+psql -f enable-rls-automatically/install.sql  # Standalone PostgreSQL
 #+end_src
 
-*** Two-Tier Collection
+* Design Principles
 
-Telemetry runs automatically via ~pg_cron~:
+- *Standard libpq authentication*: Use ~PGHOST~, ~PGPORT~, ~PGUSER~, ~PGDATABASE~, ~PGPASSWORD~ environment variables or ~.pgpass~
+- *Auto-detection over manual config*: Prefer querying the database for configuration (e.g., PG version) rather than requiring user input
+- *Supabase-first, PostgreSQL-compatible*: Optimized for Supabase but works with standard PostgreSQL where possible
 
-| Tier      | Interval   | What's Captured                                          |
-|-----------+------------+----------------------------------------------------------|
-| Snapshots | 5 minutes  | WAL, checkpoints, bgwriter, replication, temp files, I/O |
-| Samples   | 30 seconds | Wait events, active sessions, locks, operation progress  |
+* Requirements
 
-*** Key Functions
+Requirements vary by tool. See individual README files for specifics:
 
-| Function                                    | Purpose                                   |
-|---------------------------------------------+-------------------------------------------|
-| ~telemetry.track_table(name, schema)~       | Register a table for monitoring           |
-| ~telemetry.compare(start, end)~             | Compare system stats between time points  |
-| ~telemetry.table_compare(table, start, end)~ | Compare table stats between time points   |
-| ~telemetry.wait_summary(start, end)~        | Aggregate wait events over a time period  |
-| ~telemetry.cleanup(interval)~               | Remove old data (default: retain 7 days)  |
+| Tool | PostgreSQL | Extensions | Other |
+|------+------------+------------+-------|
+| batch-telemetry | 15, 16, 17 | pg_cron 1.4.1+ | - |
+| multi-region-ha | 15+ | - | Fly.io, two Supabase projects |
+| storage-to-s3 | - | - | Supabase CLI, AWS CLI v2 |
+| enable-rls-automatically | 9.3+ | - | Superuser privileges |
 
-*** Key Views
+* License
 
-| View                          | Purpose                                    |
-|-------------------------------+--------------------------------------------|
-| ~telemetry.deltas~            | Snapshot deltas (checkpoint, WAL, buffers) |
-| ~telemetry.table_deltas~      | Per-table deltas (size, tuples, vacuum)    |
-| ~telemetry.recent_locks~      | Lock contention (last 2 hours)             |
-| ~telemetry.recent_waits~      | Wait events (last 2 hours)                 |
-| ~telemetry.recent_progress~   | Vacuum/COPY/analyze progress (last 2 hours)|
-| ~telemetry.recent_replication~| Replication lag (last 2 hours)             |
-
-*** Diagnostic Patterns
-
-**** Pattern 1: Lock Contention
-
-Symptoms:
-- Batch takes 10x longer than expected
-- ~telemetry.recent_locks~ shows ~blocked_pid~ entries
-
-#+begin_src sql
-SELECT * FROM telemetry.recent_locks
-WHERE captured_at BETWEEN '2024-12-16 14:00' AND '2024-12-16 15:00';
-#+end_src
-
-**** Pattern 2: Buffer Pressure
-
-Symptoms:
-- ~bgw_buffers_backend_delta > 0~ (backends writing directly)
-- Wait events: ~LWLock:WALWrite~, ~Lock:extend~
-
-#+begin_src sql
-SELECT bgw_buffers_backend_delta, wal_bytes_pretty
-FROM telemetry.compare('2024-12-16 14:00', '2024-12-16 15:00');
-#+end_src
-
-**** Pattern 3: Checkpoint Interference
-
-Symptoms:
-- ~checkpoint_occurred = true~ during batch
-- High ~ckpt_write_time_ms~
-
-**** Pattern 4: Autovacuum Interference
-
-Symptoms:
-- ~table_compare()~ shows ~autovacuum_ran = true~
-- ~recent_progress~ shows vacuum overlapping batch
-
-**** Pattern 5: Temp File Spills
-
-Symptoms:
-- ~temp_files_delta > 0~
-- Large ~temp_bytes_delta~ (work_mem exhaustion)
-
-Resolution: Increase ~work_mem~ for the session.
-
-**** Pattern 6: Replication Lag
-
-Symptoms:
-- ~recent_replication~ shows large ~replay_lag_bytes~
-- Batch runs slowly despite no local contention
-
-Resolution: Check replica health or switch to async replication.
-
-*** Quick Diagnosis Checklist
-
-For a slow batch between ~START~ and ~END~:
-
-#+begin_src sql
--- 1. Overall health
-SELECT * FROM telemetry.compare('START', 'END');
-
--- 2. Lock contention
-SELECT * FROM telemetry.recent_locks
-WHERE captured_at BETWEEN 'START' AND 'END';
-
--- 3. Wait events
-SELECT * FROM telemetry.wait_summary('START', 'END');
-
--- 4. Table-specific (if tracking)
-SELECT * FROM telemetry.table_compare('mytable', 'START', 'END');
-
--- 5. Active operations
-SELECT * FROM telemetry.recent_progress
-WHERE captured_at BETWEEN 'START' AND 'END';
-
--- 6. Replication lag
-SELECT * FROM telemetry.recent_replication
-WHERE captured_at BETWEEN 'START' AND 'END';
-#+end_src
-
-*** PG Version Differences
-
-| Version | Checkpoint Stats         | pg_stat_io |
-|---------+--------------------------+------------|
-| PG 15   | ~pg_stat_bgwriter~       | No         |
-| PG 16   | ~pg_stat_bgwriter~       | Yes        |
-| PG 17   | ~pg_stat_checkpointer~   | Yes        |
+MIT
