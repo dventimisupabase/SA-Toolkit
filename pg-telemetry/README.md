@@ -329,6 +329,136 @@ SELECT * FROM telemetry.drop_old_partitions('samples', '7 days');
 
 **Note:** Converting existing tables to partitioned requires data migration. These functions are for new installs or users who have already migrated to partitioned tables.
 
+### 11. Health Checks and Self-Monitoring (P3)
+
+Operational visibility into the telemetry system itself:
+
+```sql
+-- Quick health status of all telemetry components
+SELECT * FROM telemetry.health_check();
+-- Returns: component, status, details, action_required
+
+-- Analyze telemetry performance impact over time
+SELECT * FROM telemetry.performance_report('24 hours');
+-- Returns: metric, value, assessment
+```
+
+**Components monitored:**
+- **Telemetry System**: Enabled/disabled status, current mode
+- **Schema Size**: Current size vs thresholds with percentage
+- **Circuit Breaker**: Recent trips in last hour
+- **Collection Freshness**: When last sample/snapshot was collected
+- **Data Volume**: Current counts of samples and snapshots
+
+**Performance metrics:**
+- Avg/Max sample duration (with assessment: Excellent/Good/Acceptable/Poor)
+- Avg snapshot duration
+- Schema size with cleanup recommendations
+- Collection success rate
+- Skipped collection count
+
+**Use cases:**
+- Operational dashboards: Monitor telemetry health
+- Troubleshooting: Identify when telemetry stops collecting
+- Capacity planning: Track growth rates and performance trends
+
+### 12. Alert System (P4)
+
+Proactive notifications for critical conditions:
+
+```sql
+-- Enable alerts
+UPDATE telemetry.config SET value = 'true' WHERE key = 'alert_enabled';
+
+-- Configure thresholds
+UPDATE telemetry.config SET value = '5' WHERE key = 'alert_circuit_breaker_count';  -- 5 trips/hour
+UPDATE telemetry.config SET value = '8000' WHERE key = 'alert_schema_size_mb';      -- 8GB warning
+
+-- Check for active alerts
+SELECT * FROM telemetry.check_alerts('1 hour');
+-- Returns: alert_type, severity, message, triggered_at, recommendation
+```
+
+**Alert types:**
+- **CIRCUIT_BREAKER_TRIPS** (CRITICAL): Excessive trips indicate system stress
+- **SCHEMA_SIZE_HIGH** (WARNING): Schema approaching critical threshold
+- **COLLECTION_FAILURES** (WARNING): Multiple collection failures detected
+- **STALE_DATA** (CRITICAL): No recent collections (possible pg_cron failure)
+
+**Integration:**
+- Poll `check_alerts()` from external monitoring (Datadog, PagerDuty, etc.)
+- Schedule via pg_cron to log alerts to application_name
+- Disabled by default to avoid alert fatigue
+
+### 13. Data Export and Integration (P4)
+
+Export telemetry data for external analysis:
+
+```sql
+-- Export to JSON for external tools
+SELECT telemetry.export_json(
+    '2024-12-16 14:00'::timestamptz,
+    '2024-12-16 15:00'::timestamptz,
+    true,  -- include_samples
+    true   -- include_snapshots
+);
+-- Returns: JSONB with export_time, start_time, end_time, samples[], snapshots[]
+```
+
+**Use cases:**
+- Export to time-series databases (InfluxDB, Prometheus)
+- Import to data warehouses for long-term analysis
+- Share incident data with support teams
+- Integrate with custom visualization tools
+
+**JSON structure:**
+```json
+{
+  "export_time": "2024-12-16T15:30:00Z",
+  "start_time": "2024-12-16T14:00:00Z",
+  "end_time": "2024-12-16T15:00:00Z",
+  "samples": [
+    {
+      "captured_at": "...",
+      "wait_events": [...],
+      "locks": [...]
+    }
+  ],
+  "snapshots": [...]
+}
+```
+
+### 14. Configuration Recommendations (P4)
+
+AI-assisted configuration optimization:
+
+```sql
+-- Get personalized recommendations based on actual usage
+SELECT * FROM telemetry.config_recommendations();
+-- Returns: category, recommendation, reason, sql_command
+```
+
+**Recommendation categories:**
+- **Performance**: Mode optimization based on sample duration
+- **Storage**: Cleanup and retention tuning based on volume
+- **Automation**: Auto-mode suggestions when overhead varies
+- **Scalability**: Partitioning recommendations for high volume
+
+**Example output:**
+```
+category     | recommendation                  | reason                           | sql_command
+-------------|---------------------------------|----------------------------------|---------------------------
+Performance  | Switch to light mode            | Average sample duration is 1200ms| SELECT telemetry.set_mode('light');
+Storage      | Run cleanup to reclaim space    | Schema size is 6500 MB           | SELECT * FROM telemetry.cleanup();
+Automation   | Enable automatic mode switching | Sample duration varies           | UPDATE telemetry.config SET...
+```
+
+**When to use:**
+- After initial deployment (baseline configuration)
+- During capacity planning exercises
+- When investigating performance issues
+- Quarterly optimization reviews
+
 ## Anomaly Detection
 
 Automatically detects 6 common issues:
@@ -373,7 +503,7 @@ The test suite uses [pgTAP](https://pgtap.org/) via `supabase test db`.
 # Ensure local Supabase is running
 supabase start
 
-# Run all tests (108 tests)
+# Run all tests (127 tests)
 supabase test db
 ```
 
@@ -384,7 +514,7 @@ supabase test db
 | Category | Tests | Description |
 |----------|-------|-------------|
 | Installation Verification | 16 | Schema, 12 tables, 7 views |
-| Function Existence | 24 | All functions including P0/P1/P2 safety helpers |
+| Function Existence | 24 | All functions including P0/P1/P2/P3/P4 helpers |
 | Core Functionality | 10 | snapshot(), sample(), config |
 | Table Tracking | 5 | track/untrack/list operations |
 | Analysis Functions | 8 | compare(), wait_summary(), anomaly_report(), etc. |
@@ -394,6 +524,8 @@ supabase test db
 | P0 Safety Features | 10 | Circuit breaker, exception handling, stats tracking |
 | P1 Safety Features | 8 | Schema size monitoring, optimized queries, post-cleanup VACUUM |
 | P2 Safety Features | 12 | Auto mode switching, configurable retention, partition helpers |
+| P3 Operational Features | 9 | Health checks, performance reports, self-monitoring |
+| P4 Advanced Features | 10 | Alerts, JSON export, configuration recommendations |
 
 ## Standalone Installation (Non-Supabase)
 

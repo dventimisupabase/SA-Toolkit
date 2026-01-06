@@ -620,7 +620,14 @@ INSERT INTO telemetry.config (key, value) VALUES
     -- P2: Configurable retention by table type
     ('retention_samples_days', '7'),           -- Retention for samples table
     ('retention_snapshots_days', '30'),        -- Retention for snapshots table
-    ('retention_statements_days', '30')        -- Retention for pg_stat_statements snapshots
+    ('retention_statements_days', '30'),       -- Retention for pg_stat_statements snapshots
+    -- P3: Self-monitoring and health checks
+    ('self_monitoring_enabled', 'true'),       -- Track telemetry system performance
+    ('health_check_enabled', 'true'),          -- Enable health check function
+    -- P4: Advanced features
+    ('alert_enabled', 'false'),                -- Enable alert notifications
+    ('alert_circuit_breaker_count', '5'),      -- Alert if circuit breaker trips N times in hour
+    ('alert_schema_size_mb', '8000')           -- Alert if schema exceeds threshold (80% of critical)
 ON CONFLICT (key) DO NOTHING;
 
 -- -----------------------------------------------------------------------------
@@ -831,8 +838,8 @@ BEGIN
         -- High connection utilization
         IF v_current_mode = 'normal' THEN
             v_suggested_mode := 'light';
-            v_reason := format('Active connections at %.1f%% of max (threshold: %s%%)',
-                              v_connection_pct, v_connections_threshold);
+            v_reason := format('Active connections at %s%% of max (threshold: %s%%)',
+                              round(v_connection_pct, 1)::text, v_connections_threshold);
         END IF;
     ELSE
         -- System looks healthy, consider downgrading mode
@@ -841,8 +848,8 @@ BEGIN
             v_reason := 'System recovered: no recent circuit breaker trips';
         ELSIF v_current_mode = 'light' AND v_connection_pct < (v_connections_threshold * 0.7) THEN
             v_suggested_mode := 'normal';
-            v_reason := format('System load reduced: connections at %.1f%% (threshold: %s%%)',
-                              v_connection_pct, v_connections_threshold);
+            v_reason := format('System load reduced: connections at %s%% (threshold: %s%%)',
+                              round(v_connection_pct, 1)::text, v_connections_threshold);
         END IF;
     END IF;
 
@@ -3213,6 +3220,516 @@ BEGIN
         FROM partition_info
         WHERE parent_table = t.table_name
     ) pi ON true;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- P3: Self-Monitoring and Health Checks
+-- -----------------------------------------------------------------------------
+
+-- P3: System health check - quick operational status
+CREATE OR REPLACE FUNCTION telemetry.health_check()
+RETURNS TABLE(
+    component TEXT,
+    status TEXT,
+    details TEXT,
+    action_required TEXT
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_enabled TEXT;
+    v_schema_size_mb NUMERIC;
+    v_schema_critical_mb INTEGER;
+    v_recent_trips INTEGER;
+    v_last_sample TIMESTAMPTZ;
+    v_last_snapshot TIMESTAMPTZ;
+    v_sample_count INTEGER;
+    v_snapshot_count INTEGER;
+BEGIN
+    -- Check if telemetry is enabled
+    v_enabled := telemetry._get_config('enabled', 'true');
+    IF v_enabled = 'false' THEN
+        RETURN QUERY SELECT
+            'Telemetry System'::text,
+            'DISABLED'::text,
+            'Collection is disabled'::text,
+            'Run telemetry.enable() to restart'::text;
+        RETURN;
+    END IF;
+
+    -- Component 1: Overall system status
+    RETURN QUERY SELECT
+        'Telemetry System'::text,
+        'ENABLED'::text,
+        format('Mode: %s', telemetry._get_config('mode', 'normal')),
+        NULL::text;
+
+    -- Component 2: Schema size
+    SELECT s.schema_size_mb, s.critical_threshold_mb, s.status
+    INTO v_schema_size_mb, v_schema_critical_mb, v_enabled
+    FROM telemetry._check_schema_size() s;
+
+    RETURN QUERY SELECT
+        'Schema Size'::text,
+        v_enabled::text,
+        format('%s MB / %s MB (%s%%)',
+               round(v_schema_size_mb, 2)::text,
+               v_schema_critical_mb::text,
+               round((v_schema_size_mb / NULLIF(v_schema_critical_mb, 0)) * 100, 1)::text),
+        CASE
+            WHEN v_enabled = 'CRITICAL' THEN 'Run cleanup() immediately'
+            WHEN v_enabled = 'WARNING' THEN 'Schedule cleanup() soon'
+            ELSE NULL
+        END::text;
+
+    -- Component 3: Circuit breaker status
+    SELECT count(*)
+    INTO v_recent_trips
+    FROM telemetry.collection_stats
+    WHERE skipped = true
+      AND started_at > now() - interval '1 hour'
+      AND skipped_reason LIKE '%Circuit breaker%';
+
+    RETURN QUERY SELECT
+        'Circuit Breaker'::text,
+        CASE
+            WHEN v_recent_trips = 0 THEN 'OK'
+            WHEN v_recent_trips < 3 THEN 'WARNING'
+            ELSE 'CRITICAL'
+        END::text,
+        format('%s trips in last hour', v_recent_trips),
+        CASE
+            WHEN v_recent_trips >= 3 THEN 'System under stress - consider emergency mode'
+            ELSE NULL
+        END::text;
+
+    -- Component 4: Collection freshness
+    SELECT max(captured_at) INTO v_last_sample FROM telemetry.samples;
+    SELECT max(captured_at) INTO v_last_snapshot FROM telemetry.snapshots;
+
+    RETURN QUERY SELECT
+        'Sample Collection'::text,
+        CASE
+            WHEN v_last_sample IS NULL THEN 'ERROR'
+            WHEN v_last_sample > now() - interval '5 minutes' THEN 'OK'
+            WHEN v_last_sample > now() - interval '15 minutes' THEN 'WARNING'
+            ELSE 'CRITICAL'
+        END::text,
+        CASE
+            WHEN v_last_sample IS NULL THEN 'No samples collected'
+            ELSE format('Last: %s ago', age(now(), v_last_sample))
+        END,
+        CASE
+            WHEN v_last_sample IS NULL OR v_last_sample < now() - interval '15 minutes'
+            THEN 'Check pg_cron jobs'
+            ELSE NULL
+        END::text;
+
+    RETURN QUERY SELECT
+        'Snapshot Collection'::text,
+        CASE
+            WHEN v_last_snapshot IS NULL THEN 'ERROR'
+            WHEN v_last_snapshot > now() - interval '10 minutes' THEN 'OK'
+            WHEN v_last_snapshot > now() - interval '30 minutes' THEN 'WARNING'
+            ELSE 'CRITICAL'
+        END::text,
+        CASE
+            WHEN v_last_snapshot IS NULL THEN 'No snapshots collected'
+            ELSE format('Last: %s ago', age(now(), v_last_snapshot))
+        END,
+        CASE
+            WHEN v_last_snapshot IS NULL OR v_last_snapshot < now() - interval '30 minutes'
+            THEN 'Check pg_cron jobs'
+            ELSE NULL
+        END::text;
+
+    -- Component 5: Data volume
+    SELECT count(*) INTO v_sample_count FROM telemetry.samples;
+    SELECT count(*) INTO v_snapshot_count FROM telemetry.snapshots;
+
+    RETURN QUERY SELECT
+        'Data Volume'::text,
+        'INFO'::text,
+        format('Samples: %s, Snapshots: %s', v_sample_count, v_snapshot_count),
+        NULL::text;
+END;
+$$;
+
+-- P3: Performance impact analysis - quantify telemetry overhead
+CREATE OR REPLACE FUNCTION telemetry.performance_report(p_lookback_interval INTERVAL DEFAULT '24 hours')
+RETURNS TABLE(
+    metric TEXT,
+    value TEXT,
+    assessment TEXT
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_avg_sample_ms NUMERIC;
+    v_max_sample_ms INTEGER;
+    v_avg_snapshot_ms NUMERIC;
+    v_max_snapshot_ms INTEGER;
+    v_total_collections INTEGER;
+    v_failed_collections INTEGER;
+    v_skipped_collections INTEGER;
+    v_schema_size_mb NUMERIC;
+BEGIN
+    -- Calculate collection performance
+    SELECT
+        avg(duration_ms) FILTER (WHERE collection_type = 'sample' AND success = true AND skipped = false),
+        max(duration_ms) FILTER (WHERE collection_type = 'sample' AND success = true AND skipped = false),
+        avg(duration_ms) FILTER (WHERE collection_type = 'snapshot' AND success = true AND skipped = false),
+        max(duration_ms) FILTER (WHERE collection_type = 'snapshot' AND success = true AND skipped = false),
+        count(*),
+        count(*) FILTER (WHERE success = false),
+        count(*) FILTER (WHERE skipped = true)
+    INTO v_avg_sample_ms, v_max_sample_ms, v_avg_snapshot_ms, v_max_snapshot_ms,
+         v_total_collections, v_failed_collections, v_skipped_collections
+    FROM telemetry.collection_stats
+    WHERE started_at > now() - p_lookback_interval;
+
+    -- Get current schema size
+    SELECT schema_size_mb INTO v_schema_size_mb FROM telemetry._check_schema_size();
+
+    -- Return metrics
+    RETURN QUERY SELECT
+        'Avg Sample Duration'::text,
+        COALESCE(round(v_avg_sample_ms)::text || ' ms', 'N/A'),
+        CASE
+            WHEN v_avg_sample_ms IS NULL THEN 'No data'
+            WHEN v_avg_sample_ms < 100 THEN 'Excellent'
+            WHEN v_avg_sample_ms < 500 THEN 'Good'
+            WHEN v_avg_sample_ms < 1000 THEN 'Acceptable'
+            ELSE 'Poor - consider emergency mode'
+        END::text;
+
+    RETURN QUERY SELECT
+        'Max Sample Duration'::text,
+        COALESCE(v_max_sample_ms::text || ' ms', 'N/A'),
+        CASE
+            WHEN v_max_sample_ms IS NULL THEN 'No data'
+            WHEN v_max_sample_ms < 1000 THEN 'Good'
+            WHEN v_max_sample_ms < 5000 THEN 'Acceptable'
+            ELSE 'Circuit breaker may trip'
+        END::text;
+
+    RETURN QUERY SELECT
+        'Avg Snapshot Duration'::text,
+        COALESCE(round(v_avg_snapshot_ms)::text || ' ms', 'N/A'),
+        CASE
+            WHEN v_avg_snapshot_ms IS NULL THEN 'No data'
+            WHEN v_avg_snapshot_ms < 500 THEN 'Excellent'
+            WHEN v_avg_snapshot_ms < 2000 THEN 'Good'
+            WHEN v_avg_snapshot_ms < 5000 THEN 'Acceptable'
+            ELSE 'Poor'
+        END::text;
+
+    RETURN QUERY SELECT
+        'Schema Size'::text,
+        round(v_schema_size_mb)::text || ' MB',
+        CASE
+            WHEN v_schema_size_mb < 1000 THEN 'Healthy'
+            WHEN v_schema_size_mb < 5000 THEN 'Good'
+            WHEN v_schema_size_mb < 8000 THEN 'Consider cleanup()'
+            ELSE 'Run cleanup() soon'
+        END::text;
+
+    RETURN QUERY SELECT
+        'Collection Success Rate'::text,
+        format('%s%% (%s/%s)',
+               round(((v_total_collections - v_failed_collections)::numeric / NULLIF(v_total_collections, 0)) * 100, 1)::text,
+               v_total_collections - v_failed_collections,
+               v_total_collections),
+        CASE
+            WHEN v_total_collections = 0 THEN 'No collections'
+            WHEN v_failed_collections = 0 THEN 'Perfect'
+            WHEN (v_failed_collections::numeric / v_total_collections) < 0.01 THEN 'Excellent'
+            WHEN (v_failed_collections::numeric / v_total_collections) < 0.05 THEN 'Good'
+            ELSE 'Issues detected'
+        END::text;
+
+    RETURN QUERY SELECT
+        'Skipped Collections'::text,
+        v_skipped_collections::text,
+        CASE
+            WHEN v_skipped_collections = 0 THEN 'No skips'
+            WHEN v_skipped_collections < 5 THEN 'Minimal'
+            WHEN v_skipped_collections < 20 THEN 'Moderate - check system load'
+            ELSE 'Significant - system under stress'
+        END::text;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- P4: Advanced Features - Alerts and Export
+-- -----------------------------------------------------------------------------
+
+-- P4: Check alert conditions and return notifications
+CREATE OR REPLACE FUNCTION telemetry.check_alerts(p_lookback_interval INTERVAL DEFAULT '1 hour')
+RETURNS TABLE(
+    alert_type TEXT,
+    severity TEXT,
+    message TEXT,
+    triggered_at TIMESTAMPTZ,
+    recommendation TEXT
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_enabled BOOLEAN;
+    v_cb_threshold INTEGER;
+    v_cb_count INTEGER;
+    v_schema_threshold_mb INTEGER;
+    v_schema_size_mb NUMERIC;
+BEGIN
+    -- Check if alerts are enabled
+    v_enabled := COALESCE(
+        telemetry._get_config('alert_enabled', 'false')::boolean,
+        false
+    );
+
+    IF NOT v_enabled THEN
+        RETURN;
+    END IF;
+
+    -- Alert 1: Excessive circuit breaker trips
+    v_cb_threshold := COALESCE(
+        telemetry._get_config('alert_circuit_breaker_count', '5')::integer,
+        5
+    );
+
+    SELECT count(*) INTO v_cb_count
+    FROM telemetry.collection_stats
+    WHERE skipped = true
+      AND started_at > now() - p_lookback_interval
+      AND skipped_reason LIKE '%Circuit breaker%';
+
+    IF v_cb_count >= v_cb_threshold THEN
+        RETURN QUERY SELECT
+            'CIRCUIT_BREAKER_TRIPS'::text,
+            'CRITICAL'::text,
+            format('Circuit breaker tripped %s times in last %s', v_cb_count, p_lookback_interval),
+            now(),
+            'System under severe stress. Consider switching to emergency mode or disabling telemetry temporarily.'::text;
+    END IF;
+
+    -- Alert 2: Schema size approaching critical
+    v_schema_threshold_mb := COALESCE(
+        telemetry._get_config('alert_schema_size_mb', '8000')::integer,
+        8000
+    );
+
+    SELECT schema_size_mb INTO v_schema_size_mb FROM telemetry._check_schema_size();
+
+    IF v_schema_size_mb >= v_schema_threshold_mb THEN
+        RETURN QUERY SELECT
+            'SCHEMA_SIZE_HIGH'::text,
+            'WARNING'::text,
+            format('Schema size is %s MB (threshold: %s MB)', round(v_schema_size_mb)::text, v_schema_threshold_mb),
+            now(),
+            'Run telemetry.cleanup() to reclaim space.'::text;
+    END IF;
+
+    -- Alert 3: Collection failures
+    DECLARE
+        v_recent_failures INTEGER;
+    BEGIN
+        SELECT count(*) INTO v_recent_failures
+        FROM telemetry.collection_stats
+        WHERE success = false
+          AND started_at > now() - p_lookback_interval;
+
+        IF v_recent_failures >= 5 THEN
+            RETURN QUERY SELECT
+                'COLLECTION_FAILURES'::text,
+                'WARNING'::text,
+                format('%s collection failures in last %s', v_recent_failures, p_lookback_interval),
+                now(),
+                'Check PostgreSQL logs for error details.'::text;
+        END IF;
+    END;
+
+    -- Alert 4: No recent collections (stale data)
+    DECLARE
+        v_last_sample TIMESTAMPTZ;
+    BEGIN
+        SELECT max(captured_at) INTO v_last_sample FROM telemetry.samples;
+
+        IF v_last_sample IS NULL OR v_last_sample < now() - interval '15 minutes' THEN
+            RETURN QUERY SELECT
+                'STALE_DATA'::text,
+                'CRITICAL'::text,
+                CASE
+                    WHEN v_last_sample IS NULL THEN 'No samples collected yet'
+                    ELSE format('Last sample was %s ago', age(now(), v_last_sample))
+                END,
+                now(),
+                'Check pg_cron jobs: SELECT * FROM cron.job WHERE jobname LIKE ''telemetry_%'''::text;
+        END IF;
+    END;
+END;
+$$;
+
+-- P4: Export telemetry data to JSON format
+CREATE OR REPLACE FUNCTION telemetry.export_json(
+    p_start_time TIMESTAMPTZ,
+    p_end_time TIMESTAMPTZ,
+    p_include_samples BOOLEAN DEFAULT true,
+    p_include_snapshots BOOLEAN DEFAULT true
+)
+RETURNS JSONB
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_result JSONB;
+    v_samples JSONB;
+    v_snapshots JSONB;
+BEGIN
+    v_result := jsonb_build_object(
+        'export_time', now(),
+        'start_time', p_start_time,
+        'end_time', p_end_time
+    );
+
+    -- Export samples
+    IF p_include_samples THEN
+        SELECT jsonb_agg(
+            jsonb_build_object(
+                'captured_at', s.captured_at,
+                'wait_events', (
+                    SELECT jsonb_agg(jsonb_build_object(
+                        'backend_type', ws.backend_type,
+                        'wait_event_type', ws.wait_event_type,
+                        'wait_event', ws.wait_event,
+                        'count', ws.count
+                    ))
+                    FROM telemetry.wait_samples ws
+                    WHERE ws.sample_id = s.id
+                ),
+                'locks', (
+                    SELECT jsonb_agg(jsonb_build_object(
+                        'blocked_pid', ls.blocked_pid,
+                        'blocking_pid', ls.blocking_pid,
+                        'lock_type', ls.lock_type
+                    ))
+                    FROM telemetry.lock_samples ls
+                    WHERE ls.sample_id = s.id
+                )
+            )
+        )
+        INTO v_samples
+        FROM telemetry.samples s
+        WHERE s.captured_at BETWEEN p_start_time AND p_end_time;
+
+        v_result := v_result || jsonb_build_object('samples', COALESCE(v_samples, '[]'::jsonb));
+    END IF;
+
+    -- Export snapshots
+    IF p_include_snapshots THEN
+        SELECT jsonb_agg(
+            jsonb_build_object(
+                'captured_at', sn.captured_at,
+                'wal_bytes', sn.wal_bytes,
+                'ckpt_timed', sn.ckpt_timed,
+                'ckpt_requested', sn.ckpt_requested,
+                'bgw_buffers_backend', sn.bgw_buffers_backend
+            )
+        )
+        INTO v_snapshots
+        FROM telemetry.snapshots sn
+        WHERE sn.captured_at BETWEEN p_start_time AND p_end_time;
+
+        v_result := v_result || jsonb_build_object('snapshots', COALESCE(v_snapshots, '[]'::jsonb));
+    END IF;
+
+    RETURN v_result;
+END;
+$$;
+
+-- P4: Configuration recommendations engine
+CREATE OR REPLACE FUNCTION telemetry.config_recommendations()
+RETURNS TABLE(
+    category TEXT,
+    recommendation TEXT,
+    reason TEXT,
+    sql_command TEXT
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_mode TEXT;
+    v_schema_size_mb NUMERIC;
+    v_avg_sample_ms NUMERIC;
+    v_sample_count INTEGER;
+    v_snapshot_count INTEGER;
+    v_retention_samples INTEGER;
+    v_retention_snapshots INTEGER;
+BEGIN
+    -- Get current state
+    v_mode := telemetry._get_config('mode', 'normal');
+    SELECT schema_size_mb INTO v_schema_size_mb FROM telemetry._check_schema_size();
+    SELECT count(*) INTO v_sample_count FROM telemetry.samples;
+    SELECT count(*) INTO v_snapshot_count FROM telemetry.snapshots;
+
+    SELECT avg(duration_ms) INTO v_avg_sample_ms
+    FROM telemetry.collection_stats
+    WHERE collection_type = 'sample'
+      AND success = true
+      AND skipped = false
+      AND started_at > now() - interval '24 hours';
+
+    v_retention_samples := telemetry._get_config('retention_samples_days', '7')::integer;
+    v_retention_snapshots := telemetry._get_config('retention_snapshots_days', '30')::integer;
+
+    -- Recommendation 1: Mode optimization
+    IF v_avg_sample_ms > 1000 AND v_mode = 'normal' THEN
+        RETURN QUERY SELECT
+            'Performance'::text,
+            'Switch to light mode'::text,
+            format('Average sample duration is %s ms, which may impact system performance', round(v_avg_sample_ms)),
+            'SELECT telemetry.set_mode(''light'');'::text;
+    END IF;
+
+    -- Recommendation 2: Schema size
+    IF v_schema_size_mb > 5000 THEN
+        RETURN QUERY SELECT
+            'Storage'::text,
+            'Run cleanup to reclaim space'::text,
+            format('Schema size is %s MB', round(v_schema_size_mb)::text),
+            'SELECT * FROM telemetry.cleanup();'::text;
+    END IF;
+
+    -- Recommendation 3: Retention tuning
+    IF v_sample_count > 50000 AND v_retention_samples > 7 THEN
+        RETURN QUERY SELECT
+            'Storage'::text,
+            'Reduce sample retention period'::text,
+            format('High sample count (%s) with %s day retention', v_sample_count, v_retention_samples),
+            format('UPDATE telemetry.config SET value = ''3'' WHERE key = ''retention_samples_days'';')::text;
+    END IF;
+
+    -- Recommendation 4: Auto-mode
+    IF v_avg_sample_ms > 500 AND telemetry._get_config('auto_mode_enabled', 'false') = 'false' THEN
+        RETURN QUERY SELECT
+            'Automation'::text,
+            'Enable automatic mode switching'::text,
+            'Sample duration varies significantly - auto-mode can help reduce overhead during peaks'::text,
+            'UPDATE telemetry.config SET value = ''true'' WHERE key = ''auto_mode_enabled'';'::text;
+    END IF;
+
+    -- Recommendation 5: Consider partitioning
+    IF v_sample_count > 100000 THEN
+        RETURN QUERY SELECT
+            'Scalability'::text,
+            'Consider implementing table partitioning'::text,
+            format('Very high sample count (%s) - partitioning improves cleanup performance', v_sample_count),
+            'See documentation for partition_status() and create_next_partition() functions.'::text;
+    END IF;
+
+    -- If no recommendations, return success message
+    IF NOT FOUND THEN
+        RETURN QUERY SELECT
+            'System Health'::text,
+            'Configuration looks optimal'::text,
+            'No configuration changes recommended at this time'::text,
+            NULL::text;
+    END IF;
 END;
 $$;
 

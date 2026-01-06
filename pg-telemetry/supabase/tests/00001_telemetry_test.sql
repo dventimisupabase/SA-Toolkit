@@ -6,7 +6,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(108);  -- Total number of tests (73 + 15 P0 + 8 P1 + 12 P2 = 108)
+SELECT plan(127);  -- Total number of tests (73 + 15 P0 + 8 P1 + 12 P2 + 9 P3 + 10 P4 = 127)
 
 -- =============================================================================
 -- 1. INSTALLATION VERIFICATION (16 tests)
@@ -569,6 +569,135 @@ SELECT has_function(
 SELECT has_function(
     'telemetry', 'partition_status',
     'P2: Function telemetry.partition_status should exist'
+);
+
+-- =============================================================================
+-- 11. P3 FEATURES - Self-Monitoring and Health Checks (9 tests)
+-- =============================================================================
+
+-- Test P3: Config entries exist
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.config WHERE key = 'self_monitoring_enabled'),
+    'P3: Self-monitoring enabled config should exist'
+);
+
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.config WHERE key = 'health_check_enabled'),
+    'P3: Health check enabled config should exist'
+);
+
+-- Test P3: Health check function exists
+SELECT has_function(
+    'telemetry', 'health_check',
+    'P3: Function telemetry.health_check should exist'
+);
+
+-- Test P3: Health check returns results
+SELECT ok(
+    (SELECT count(*) FROM telemetry.health_check()) >= 5,
+    'P3: health_check() should return at least 5 components'
+);
+
+-- Test P3: Health check shows enabled status
+SELECT ok(
+    EXISTS (
+        SELECT 1 FROM telemetry.health_check()
+        WHERE component = 'Telemetry System'
+          AND status = 'ENABLED'
+    ),
+    'P3: health_check() should show system as enabled'
+);
+
+-- Test P3: Performance report function exists
+SELECT has_function(
+    'telemetry', 'performance_report',
+    'P3: Function telemetry.performance_report should exist'
+);
+
+-- Test P3: Performance report returns results
+SELECT ok(
+    (SELECT count(*) FROM telemetry.performance_report('24 hours')) >= 5,
+    'P3: performance_report() should return at least 5 metrics'
+);
+
+-- Test P3: Performance report includes key metrics
+SELECT ok(
+    EXISTS (
+        SELECT 1 FROM telemetry.performance_report('24 hours')
+        WHERE metric = 'Schema Size'
+    ),
+    'P3: performance_report() should include schema size metric'
+);
+
+-- Test P3: Performance report includes assessment
+SELECT ok(
+    (
+        SELECT count(*) FROM telemetry.performance_report('24 hours')
+        WHERE assessment IS NOT NULL
+    ) >= 5,
+    'P3: performance_report() should include assessments for all metrics'
+);
+
+-- =============================================================================
+-- 12. P4 FEATURES - Advanced Features (10 tests)
+-- =============================================================================
+
+-- Test P4: Alert config entries exist
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.config WHERE key = 'alert_enabled'),
+    'P4: Alert enabled config should exist'
+);
+
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.config WHERE key = 'alert_circuit_breaker_count'),
+    'P4: Alert circuit breaker count config should exist'
+);
+
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.config WHERE key = 'alert_schema_size_mb'),
+    'P4: Alert schema size config should exist'
+);
+
+-- Test P4: Alert function exists
+SELECT has_function(
+    'telemetry', 'check_alerts',
+    'P4: Function telemetry.check_alerts should exist'
+);
+
+-- Test P4: Alerts disabled by default
+SELECT ok(
+    (SELECT value FROM telemetry.config WHERE key = 'alert_enabled') = 'false',
+    'P4: Alerts should be disabled by default'
+);
+
+-- Test P4: Export function exists
+SELECT has_function(
+    'telemetry', 'export_json',
+    'P4: Function telemetry.export_json should exist'
+);
+
+-- Test P4: Export returns valid JSON
+SELECT lives_ok(
+    $$SELECT telemetry.export_json(now() - interval '1 hour', now())$$,
+    'P4: export_json() should execute without error'
+);
+
+-- Test P4: Export includes metadata
+SELECT ok(
+    (SELECT telemetry.export_json(now() - interval '1 hour', now()) ? 'export_time'),
+    'P4: export_json() should include export_time in result'
+);
+
+-- Test P4: Config recommendations function exists
+SELECT has_function(
+    'telemetry', 'config_recommendations',
+    'P4: Function telemetry.config_recommendations should exist'
+);
+
+-- Test P4: Config recommendations returns results
+SELECT ok(
+    (SELECT count(*) FROM telemetry.config_recommendations()) >= 1,
+    'P4: config_recommendations() should return at least one row'
 );
 
 SELECT * FROM finish();
