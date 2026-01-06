@@ -2340,6 +2340,117 @@ END;
 $$;
 
 -- -----------------------------------------------------------------------------
+-- telemetry.disable() - Emergency kill switch: stop all collection
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry.disable()
+RETURNS TEXT
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_unscheduled INTEGER := 0;
+BEGIN
+    -- Unschedule all telemetry jobs
+    BEGIN
+        PERFORM cron.unschedule('telemetry_snapshot')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_snapshot');
+        IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
+
+        PERFORM cron.unschedule('telemetry_sample')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_sample');
+        IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
+
+        PERFORM cron.unschedule('telemetry_cleanup')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_cleanup');
+        IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
+
+        -- Mark as disabled in config
+        INSERT INTO telemetry.config (key, value, updated_at)
+        VALUES ('enabled', 'false', now())
+        ON CONFLICT (key) DO UPDATE SET value = 'false', updated_at = now();
+
+        RETURN format('Telemetry collection stopped. Unscheduled %s cron jobs. Use telemetry.enable() to restart.', v_unscheduled);
+    EXCEPTION
+        WHEN undefined_table THEN
+            RETURN 'pg_cron extension not found. No jobs to unschedule.';
+        WHEN undefined_function THEN
+            RETURN 'pg_cron extension not found. No jobs to unschedule.';
+    END;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- telemetry.enable() - Restart collection after kill switch
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry.enable()
+RETURNS TEXT
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_mode TEXT;
+    v_pgcron_version TEXT;
+    v_supports_subsecond BOOLEAN := FALSE;
+    v_sample_schedule TEXT;
+    v_scheduled INTEGER := 0;
+BEGIN
+    -- Get current mode
+    v_mode := telemetry._get_config('mode', 'normal');
+
+    BEGIN
+        -- Check pg_cron version
+        SELECT extversion INTO v_pgcron_version FROM pg_extension WHERE extname = 'pg_cron';
+
+        IF v_pgcron_version IS NULL THEN
+            RETURN 'pg_cron extension not found. Cannot schedule automatic collection.';
+        END IF;
+
+        v_pgcron_version := split_part(v_pgcron_version, '-', 1);
+        v_supports_subsecond := (
+            split_part(v_pgcron_version, '.', 1)::int > 1 OR
+            (split_part(v_pgcron_version, '.', 1)::int = 1 AND
+             split_part(v_pgcron_version, '.', 2)::int > 4) OR
+            (split_part(v_pgcron_version, '.', 1)::int = 1 AND
+             split_part(v_pgcron_version, '.', 2)::int = 4 AND
+             COALESCE(NULLIF(split_part(v_pgcron_version, '.', 3), '')::int, 0) >= 1)
+        );
+
+        -- Schedule snapshot (every 5 minutes)
+        PERFORM cron.schedule('telemetry_snapshot', '*/5 * * * *', 'SELECT telemetry.snapshot()');
+        v_scheduled := v_scheduled + 1;
+
+        -- Schedule sample based on mode and pg_cron capabilities
+        IF v_mode = 'normal' AND v_supports_subsecond THEN
+            PERFORM cron.schedule('telemetry_sample', '30 seconds', 'SELECT telemetry.sample()');
+            v_sample_schedule := '30 seconds';
+        ELSIF v_mode = 'light' OR (v_mode = 'normal' AND NOT v_supports_subsecond) THEN
+            PERFORM cron.schedule('telemetry_sample', '* * * * *', 'SELECT telemetry.sample()');
+            v_sample_schedule := '* * * * * (every minute)';
+        ELSIF v_mode = 'emergency' THEN
+            PERFORM cron.schedule('telemetry_sample', '*/2 * * * *', 'SELECT telemetry.sample()');
+            v_sample_schedule := '*/2 * * * * (every 2 minutes)';
+        END IF;
+        v_scheduled := v_scheduled + 1;
+
+        -- Schedule cleanup (daily at 3 AM)
+        PERFORM cron.schedule('telemetry_cleanup', '0 3 * * *', 'SELECT * FROM telemetry.cleanup(''7 days''::interval)');
+        v_scheduled := v_scheduled + 1;
+
+        -- Mark as enabled in config
+        INSERT INTO telemetry.config (key, value, updated_at)
+        VALUES ('enabled', 'true', now())
+        ON CONFLICT (key) DO UPDATE SET value = 'true', updated_at = now();
+
+        RETURN format('Telemetry collection restarted. Scheduled %s cron jobs in %s mode (sample: %s).',
+                     v_scheduled, v_mode, v_sample_schedule);
+    EXCEPTION
+        WHEN undefined_table THEN
+            RETURN 'pg_cron extension not found. Cannot schedule automatic collection.';
+        WHEN undefined_function THEN
+            RETURN 'pg_cron extension not found. Cannot schedule automatic collection.';
+    END;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
 -- Schedule snapshot collection via pg_cron (every 5 minutes)
 -- Schedule sample collection via pg_cron (every 30 seconds)
 -- -----------------------------------------------------------------------------

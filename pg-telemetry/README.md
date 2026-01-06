@@ -136,6 +136,22 @@ SELECT telemetry.set_mode('emergency');
 SELECT * FROM telemetry.get_mode();
 ```
 
+### Kill Switch
+
+For real emergencies, completely stop all telemetry collection:
+
+```sql
+-- Stop all collection immediately (unschedules all cron jobs)
+SELECT telemetry.disable();
+
+-- Restart collection when crisis is over
+SELECT telemetry.enable();
+```
+
+**What it does:**
+- `disable()` - Unschedules all 3 cron jobs, stops collection completely
+- `enable()` - Re-schedules jobs based on current mode setting
+
 ## Anomaly Detection
 
 Automatically detects 6 common issues:
@@ -189,12 +205,13 @@ supabase test db
 | Category | Tests | Description |
 |----------|-------|-------------|
 | Installation Verification | 15 | Schema, tables, views, functions |
-| Function Existence | 19 | All 19 functions present |
+| Function Existence | 21 | All 21 functions present |
 | Core Functionality | 10 | snapshot(), sample(), config |
 | Table Tracking | 5 | track/untrack/list operations |
 | Analysis Functions | 8 | compare(), wait_summary(), anomaly_report(), etc. |
 | Configuration | 5 | get_mode(), set_mode() |
 | Views | 5 | All views queryable |
+| Kill Switch | 6 | disable(), enable() |
 
 ## Standalone Installation (Non-Supabase)
 

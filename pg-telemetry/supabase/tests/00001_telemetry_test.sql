@@ -6,7 +6,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(67);  -- Total number of tests
+SELECT plan(73);  -- Total number of tests
 
 -- =============================================================================
 -- 1. INSTALLATION VERIFICATION (15 tests)
@@ -340,6 +340,40 @@ SELECT lives_ok(
 SELECT lives_ok(
     $$SELECT * FROM telemetry.recent_progress LIMIT 1$$,
     'recent_progress view should be queryable'
+);
+
+-- =============================================================================
+-- 8. KILL SWITCH (6 tests)
+-- =============================================================================
+
+-- Test disable() function exists
+SELECT has_function('telemetry', 'disable', 'Function telemetry.disable should exist');
+
+-- Test enable() function exists
+SELECT has_function('telemetry', 'enable', 'Function telemetry.enable should exist');
+
+-- Test disable() stops collection
+SELECT lives_ok(
+    $$SELECT telemetry.disable()$$,
+    'disable() should execute without error'
+);
+
+-- Verify jobs are unscheduled
+SELECT ok(
+    NOT EXISTS (SELECT 1 FROM cron.job WHERE jobname LIKE 'telemetry%'),
+    'All telemetry cron jobs should be unscheduled after disable()'
+);
+
+-- Test enable() restarts collection
+SELECT lives_ok(
+    $$SELECT telemetry.enable()$$,
+    'enable() should execute without error'
+);
+
+-- Verify jobs are rescheduled
+SELECT ok(
+    (SELECT count(*) FROM cron.job WHERE jobname LIKE 'telemetry%') = 3,
+    'All 3 telemetry cron jobs should be rescheduled after enable()'
 );
 
 SELECT * FROM finish();
