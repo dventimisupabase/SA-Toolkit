@@ -609,7 +609,10 @@ INSERT INTO telemetry.config (key, value) VALUES
     ('enable_locks', 'true'),
     ('enable_progress', 'true'),
     ('circuit_breaker_threshold_ms', '5000'),  -- Skip collection if last run exceeded this
-    ('circuit_breaker_enabled', 'true')
+    ('circuit_breaker_enabled', 'true'),
+    ('schema_size_warning_mb', '5000'),        -- Warn when schema exceeds 5GB
+    ('schema_size_critical_mb', '10000'),      -- Auto-disable when schema exceeds 10GB
+    ('schema_size_check_enabled', 'true')
 ON CONFLICT (key) DO NOTHING;
 
 -- -----------------------------------------------------------------------------
@@ -754,6 +757,98 @@ LANGUAGE sql STABLE AS $$
 $$;
 
 -- -----------------------------------------------------------------------------
+-- P1 Safety: Check schema size and enforce limits
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry._check_schema_size()
+RETURNS TABLE(
+    schema_size_mb NUMERIC,
+    warning_threshold_mb INTEGER,
+    critical_threshold_mb INTEGER,
+    status TEXT,
+    action_taken TEXT
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_size_bytes BIGINT;
+    v_size_mb NUMERIC;
+    v_warning_mb INTEGER;
+    v_critical_mb INTEGER;
+    v_check_enabled BOOLEAN;
+BEGIN
+    -- Check if schema size checking is enabled
+    v_check_enabled := COALESCE(
+        telemetry._get_config('schema_size_check_enabled', 'true')::boolean,
+        true
+    );
+
+    IF NOT v_check_enabled THEN
+        RETURN QUERY SELECT 0::numeric, 0, 0, 'disabled'::text, 'none'::text;
+        RETURN;
+    END IF;
+
+    -- Get thresholds from config
+    v_warning_mb := COALESCE(
+        telemetry._get_config('schema_size_warning_mb', '5000')::integer,
+        5000
+    );
+    v_critical_mb := COALESCE(
+        telemetry._get_config('schema_size_critical_mb', '10000')::integer,
+        10000
+    );
+
+    -- Calculate total schema size (all tables in telemetry schema)
+    SELECT COALESCE(sum(pg_total_relation_size(c.oid)), 0)
+    INTO v_size_bytes
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'telemetry'
+      AND c.relkind IN ('r', 'i', 't');  -- tables, indexes, TOAST
+
+    v_size_mb := round(v_size_bytes / 1024.0 / 1024.0, 2);
+
+    -- Check thresholds and take action
+    IF v_size_mb >= v_critical_mb THEN
+        -- Critical: auto-disable collection
+        BEGIN
+            PERFORM telemetry.disable();
+            RETURN QUERY SELECT
+                v_size_mb,
+                v_warning_mb,
+                v_critical_mb,
+                'CRITICAL'::text,
+                'Auto-disabled collection'::text;
+        EXCEPTION WHEN OTHERS THEN
+            RETURN QUERY SELECT
+                v_size_mb,
+                v_warning_mb,
+                v_critical_mb,
+                'CRITICAL'::text,
+                format('Failed to auto-disable: %s', SQLERRM)::text;
+        END;
+    ELSIF v_size_mb >= v_warning_mb THEN
+        -- Warning: log but continue
+        RAISE WARNING 'pg-telemetry: Schema size (% MB) exceeds warning threshold (% MB). Consider running cleanup or reducing retention.',
+            v_size_mb, v_warning_mb;
+        RETURN QUERY SELECT
+            v_size_mb,
+            v_warning_mb,
+            v_critical_mb,
+            'WARNING'::text,
+            'Logged warning'::text;
+    ELSE
+        -- OK
+        RETURN QUERY SELECT
+            v_size_mb,
+            v_warning_mb,
+            v_critical_mb,
+            'OK'::text,
+            'none'::text;
+    END IF;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
 -- Table tracking functions
 -- -----------------------------------------------------------------------------
 
@@ -824,6 +919,9 @@ BEGIN
         RAISE NOTICE 'pg-telemetry: Skipping sample collection due to circuit breaker';
         RETURN v_captured_at;
     END IF;
+
+    -- P1 Safety: Check schema size (runs every sample, auto-disables if critical)
+    PERFORM telemetry._check_schema_size();
 
     -- P0 Safety: Record collection start for circuit breaker
     v_stat_id := telemetry._record_collection_start('sample');
@@ -1106,6 +1204,9 @@ BEGIN
         RETURN v_captured_at;
     END IF;
 
+    -- P1 Safety: Check schema size (runs every 5 minutes, auto-disables if critical)
+    PERFORM telemetry._check_schema_size();
+
     -- P0 Safety: Record collection start for circuit breaker
     v_stat_id := telemetry._record_collection_start('snapshot');
 
@@ -1144,29 +1245,28 @@ BEGIN
         v_temp_bytes := 0;
     END;
 
-    -- P0 Safety: pg_stat_io collection with exception handling (PG16+)
+    -- P1 Safety: pg_stat_io collection with single query (PG16+)
     IF v_pg_version >= 16 THEN
     BEGIN
-        -- Checkpointer I/O
-        SELECT COALESCE(sum(writes), 0), COALESCE(sum(write_time), 0),
-               COALESCE(sum(fsyncs), 0), COALESCE(sum(fsync_time), 0)
-        INTO v_io_ckpt_writes, v_io_ckpt_write_time, v_io_ckpt_fsyncs, v_io_ckpt_fsync_time
-        FROM pg_stat_io WHERE backend_type = 'checkpointer';
-
-        -- Autovacuum worker I/O
-        SELECT COALESCE(sum(writes), 0), COALESCE(sum(write_time), 0)
-        INTO v_io_av_writes, v_io_av_write_time
-        FROM pg_stat_io WHERE backend_type = 'autovacuum worker';
-
-        -- Client backend I/O
-        SELECT COALESCE(sum(writes), 0), COALESCE(sum(write_time), 0)
-        INTO v_io_client_writes, v_io_client_write_time
-        FROM pg_stat_io WHERE backend_type = 'client backend';
-
-        -- Background writer I/O
-        SELECT COALESCE(sum(writes), 0), COALESCE(sum(write_time), 0)
-        INTO v_io_bgw_writes, v_io_bgw_write_time
-        FROM pg_stat_io WHERE backend_type = 'background writer';
+        -- Consolidate all backend_type queries into single query using FILTER
+        -- More efficient: single catalog lookup, single scan of pg_stat_io
+        SELECT
+            COALESCE(sum(writes) FILTER (WHERE backend_type = 'checkpointer'), 0),
+            COALESCE(sum(write_time) FILTER (WHERE backend_type = 'checkpointer'), 0),
+            COALESCE(sum(fsyncs) FILTER (WHERE backend_type = 'checkpointer'), 0),
+            COALESCE(sum(fsync_time) FILTER (WHERE backend_type = 'checkpointer'), 0),
+            COALESCE(sum(writes) FILTER (WHERE backend_type = 'autovacuum worker'), 0),
+            COALESCE(sum(write_time) FILTER (WHERE backend_type = 'autovacuum worker'), 0),
+            COALESCE(sum(writes) FILTER (WHERE backend_type = 'client backend'), 0),
+            COALESCE(sum(write_time) FILTER (WHERE backend_type = 'client backend'), 0),
+            COALESCE(sum(writes) FILTER (WHERE backend_type = 'background writer'), 0),
+            COALESCE(sum(write_time) FILTER (WHERE backend_type = 'background writer'), 0)
+        INTO
+            v_io_ckpt_writes, v_io_ckpt_write_time, v_io_ckpt_fsyncs, v_io_ckpt_fsync_time,
+            v_io_av_writes, v_io_av_write_time,
+            v_io_client_writes, v_io_client_write_time,
+            v_io_bgw_writes, v_io_bgw_write_time
+        FROM pg_stat_io;
     EXCEPTION WHEN OTHERS THEN
         RAISE WARNING 'pg-telemetry: pg_stat_io collection failed: %', SQLERRM;
         -- Set defaults
@@ -2533,12 +2633,15 @@ $$;
 CREATE OR REPLACE FUNCTION telemetry.cleanup(p_retain_interval INTERVAL DEFAULT '7 days')
 RETURNS TABLE(
     deleted_snapshots   BIGINT,
-    deleted_samples     BIGINT
+    deleted_samples     BIGINT,
+    vacuumed_tables     INTEGER
 )
 LANGUAGE plpgsql AS $$
 DECLARE
     v_deleted_snapshots BIGINT;
     v_deleted_samples BIGINT;
+    v_vacuumed_count INTEGER := 0;
+    v_table_name TEXT;
     v_cutoff TIMESTAMPTZ := now() - p_retain_interval;
 BEGIN
     -- Delete old samples (cascades to wait_samples, activity_samples, progress_samples, lock_samples)
@@ -2553,7 +2656,30 @@ BEGIN
     )
     SELECT count(*) INTO v_deleted_snapshots FROM deleted;
 
-    RETURN QUERY SELECT v_deleted_snapshots, v_deleted_samples;
+    -- P1 Safety: VACUUM ANALYZE after cleanup to reclaim space and update stats
+    -- This prevents bloat in telemetry tables and keeps query planner informed
+    FOR v_table_name IN
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'telemetry'
+          AND c.relkind = 'r'  -- regular tables only
+          AND c.relname IN (
+              'samples', 'wait_samples', 'activity_samples', 'progress_samples', 'lock_samples',
+              'snapshots', 'table_snapshots', 'replication_snapshots', 'statement_snapshots',
+              'collection_stats'
+          )
+        ORDER BY c.relname
+    LOOP
+        BEGIN
+            EXECUTE format('VACUUM ANALYZE telemetry.%I', v_table_name);
+            v_vacuumed_count := v_vacuumed_count + 1;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING 'pg-telemetry: Failed to VACUUM table %: %', v_table_name, SQLERRM;
+        END;
+    END LOOP;
+
+    RETURN QUERY SELECT v_deleted_snapshots, v_deleted_samples, v_vacuumed_count;
 END;
 $$;
 

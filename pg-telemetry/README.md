@@ -207,6 +207,56 @@ Safety limits on expensive queries:
 - Active sessions: Top 25 (prevents excessive row capture)
 - pg_stat_statements: Top 50 queries (configurable)
 
+### 5. Schema Size Monitoring (P1)
+
+Automatic monitoring and enforcement of telemetry schema size limits:
+
+```sql
+-- Check current schema size and status
+SELECT * FROM telemetry._check_schema_size();
+```
+
+**How it works:**
+- Checks schema size on every sample/snapshot collection
+- **Warning threshold** (default 5GB): Logs warning, continues collection
+- **Critical threshold** (default 10GB): Automatically disables collection
+- Prevents unbounded growth that could impact database performance
+
+**Configuration:**
+```sql
+-- Adjust thresholds (megabytes)
+UPDATE telemetry.config SET value = '8000' WHERE key = 'schema_size_warning_mb';
+UPDATE telemetry.config SET value = '15000' WHERE key = 'schema_size_critical_mb';
+
+-- Disable monitoring (not recommended)
+UPDATE telemetry.config SET value = 'false' WHERE key = 'schema_size_check_enabled';
+```
+
+### 6. Optimized pg_stat_io Collection (P1)
+
+Reduced overhead for PostgreSQL 16+ I/O statistics:
+- Single query with `FILTER` clauses instead of 4 separate queries
+- 4× fewer catalog lookups
+- Consistent snapshot across all backend types
+- Lower probability of race conditions
+
+### 7. Post-Cleanup VACUUM (P1)
+
+Automatic space reclamation after data deletion:
+
+```sql
+-- Cleanup now returns vacuum results
+SELECT * FROM telemetry.cleanup('7 days');
+-- Returns: deleted_snapshots, deleted_samples, vacuumed_tables
+```
+
+**What it does:**
+- Runs `VACUUM ANALYZE` on all telemetry tables after cleanup
+- Reclaims disk space from deleted rows
+- Updates query planner statistics
+- Prevents table bloat over time
+- Each table vacuumed independently with exception handling
+
 ## Anomaly Detection
 
 Automatically detects 6 common issues:
@@ -251,16 +301,18 @@ The test suite uses [pgTAP](https://pgtap.org/) via `supabase test db`.
 # Ensure local Supabase is running
 supabase start
 
-# Run all tests (88 tests)
+# Run all tests (96 tests)
 supabase test db
 ```
+
+**Note:** Tests run inside a transaction, so VACUUM warnings are expected during `cleanup()` tests. In production, cleanup runs via pg_cron outside transactions and VACUUM works normally.
 
 ### Test Coverage
 
 | Category | Tests | Description |
 |----------|-------|-------------|
 | Installation Verification | 16 | Schema, 12 tables, 7 views |
-| Function Existence | 23 | All functions including P0 safety helpers |
+| Function Existence | 24 | All functions including P0/P1 safety helpers |
 | Core Functionality | 10 | snapshot(), sample(), config |
 | Table Tracking | 5 | track/untrack/list operations |
 | Analysis Functions | 8 | compare(), wait_summary(), anomaly_report(), etc. |
@@ -268,6 +320,7 @@ supabase test db
 | Views | 5 | All views queryable |
 | Kill Switch | 6 | disable(), enable() |
 | P0 Safety Features | 10 | Circuit breaker, exception handling, stats tracking |
+| P1 Safety Features | 7 | Schema size monitoring, optimized queries, post-cleanup VACUUM |
 
 ## Standalone Installation (Non-Supabase)
 

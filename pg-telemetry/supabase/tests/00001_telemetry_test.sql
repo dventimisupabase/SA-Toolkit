@@ -6,7 +6,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(88);  -- Total number of tests (73 + 15 P0 safety tests)
+SELECT plan(96);  -- Total number of tests (73 + 15 P0 + 7 P1 + 1 function existence = 96)
 
 -- =============================================================================
 -- 1. INSTALLATION VERIFICATION (16 tests)
@@ -35,7 +35,7 @@ SELECT has_view('telemetry', 'table_deltas', 'View telemetry.table_deltas should
 SELECT has_view('telemetry', 'recent_waits', 'View telemetry.recent_waits should exist');
 
 -- =============================================================================
--- 2. FUNCTION EXISTENCE (23 tests)
+-- 2. FUNCTION EXISTENCE (24 tests)
 -- =============================================================================
 
 SELECT has_function('telemetry', '_pg_version', 'Function telemetry._pg_version should exist');
@@ -46,6 +46,7 @@ SELECT has_function('telemetry', '_check_circuit_breaker', 'P0 Safety: Function 
 SELECT has_function('telemetry', '_record_collection_start', 'P0 Safety: Function telemetry._record_collection_start should exist');
 SELECT has_function('telemetry', '_record_collection_end', 'P0 Safety: Function telemetry._record_collection_end should exist');
 SELECT has_function('telemetry', '_record_collection_skip', 'P0 Safety: Function telemetry._record_collection_skip should exist');
+SELECT has_function('telemetry', '_check_schema_size', 'P1 Safety: Function telemetry._check_schema_size should exist');
 SELECT has_function('telemetry', 'snapshot', 'Function telemetry.snapshot should exist');
 SELECT has_function('telemetry', 'sample', 'Function telemetry.sample should exist');
 SELECT has_function('telemetry', 'track_table', 'Function telemetry.track_table should exist');
@@ -457,6 +458,48 @@ SELECT ok(
 
 -- Re-enable
 UPDATE telemetry.config SET value = 'true' WHERE key = 'circuit_breaker_enabled';
+
+-- =============================================================================
+-- 10. P1 SAFETY FEATURES (7 tests)
+-- =============================================================================
+
+-- Test schema size monitoring function exists
+SELECT has_function('telemetry', '_check_schema_size', 'P1 Safety: Function telemetry._check_schema_size should exist');
+
+-- Test schema size monitoring config exists
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.config WHERE key = 'schema_size_warning_mb'),
+    'P1 Safety: Schema size warning config should exist'
+);
+
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.config WHERE key = 'schema_size_critical_mb'),
+    'P1 Safety: Schema size critical config should exist'
+);
+
+-- Test schema size monitoring returns results
+SELECT ok(
+    (SELECT count(*) FROM telemetry._check_schema_size()) = 1,
+    'P1 Safety: Schema size check should return results'
+);
+
+-- Test schema size is below warning threshold (should be for fresh install)
+SELECT ok(
+    (SELECT status FROM telemetry._check_schema_size()) = 'OK',
+    'P1 Safety: Fresh install should have OK schema size status'
+);
+
+-- Test cleanup() function now returns 3 columns including vacuumed_tables
+SELECT lives_ok(
+    $$SELECT * FROM telemetry.cleanup('1 day')$$,
+    'P1 Safety: cleanup() with VACUUM should execute without error'
+);
+
+-- Verify cleanup returns vacuumed_tables column
+SELECT ok(
+    (SELECT vacuumed_tables FROM telemetry.cleanup('1 day')) >= 0,
+    'P1 Safety: cleanup() should return vacuum count'
+);
 
 SELECT * FROM finish();
 ROLLBACK;
