@@ -12,6 +12,30 @@ This tool automatically collects performance metrics via `pg_cron` and provides 
 - **Capacity planning** - track WAL growth, buffer pressure, replication lag trends
 - **Incident investigation** - historical data to reconstruct what happened
 
+## Why this tool?
+
+PostgreSQL has excellent extensions for performance monitoring like [pg_wait_sampling](https://github.com/postgrespro/pg_wait_sampling) that provide Active Session History (ASH) functionality with efficient kernel-level sampling. However:
+
+- **Managed platforms restrict extensions** - Supabase, Amazon RDS, Google Cloud SQL, and Azure Database for PostgreSQL don't allow arbitrary extension installation
+- **pg_wait_sampling isn't universally available** - even when extensions are allowed, pg_wait_sampling may not be in the approved list
+
+This tool provides ASH-like functionality using **only built-in PostgreSQL features**:
+
+| Feature | pg_wait_sampling | pg-telemetry |
+|---------|------------------|--------------|
+| Wait event sampling | Yes (efficient, in-process) | Yes (via pg_stat_activity polling) |
+| Active session history | Yes | Yes |
+| Lock contention tracking | No | Yes |
+| Operation progress | No | Yes (vacuum, COPY, analyze, index) |
+| Replication lag history | No | Yes |
+| Checkpoint/WAL/I/O stats | No | Yes |
+| Custom extension required | Yes | No |
+| Works on Supabase | No | Yes |
+| Works on RDS/Cloud SQL | Maybe (check availability) | Yes |
+| Sampling overhead | Very low | Low (SQL-based polling) |
+
+**Trade-offs:** Dedicated extensions like pg_wait_sampling are more efficient (lower overhead, finer granularity). Use them when available. Use pg-telemetry when you can't install extensions or need the additional metrics it provides (locks, progress, replication, I/O).
+
 ## Requirements
 
 - PostgreSQL 15, 16, or 17
