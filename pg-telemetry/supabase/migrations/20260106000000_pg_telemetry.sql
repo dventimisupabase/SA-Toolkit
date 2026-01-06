@@ -607,8 +607,126 @@ INSERT INTO telemetry.config (key, value) VALUES
     ('statements_top_n', '50'),
     ('statements_min_calls', '1'),
     ('enable_locks', 'true'),
-    ('enable_progress', 'true')
+    ('enable_progress', 'true'),
+    ('circuit_breaker_threshold_ms', '5000'),  -- Skip collection if last run exceeded this
+    ('circuit_breaker_enabled', 'true')
 ON CONFLICT (key) DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Table: collection_stats - Track collection performance for circuit breaker
+-- -----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS telemetry.collection_stats (
+    id              SERIAL PRIMARY KEY,
+    collection_type TEXT NOT NULL,  -- 'sample' or 'snapshot'
+    started_at      TIMESTAMPTZ NOT NULL,
+    completed_at    TIMESTAMPTZ,
+    duration_ms     INTEGER,
+    success         BOOLEAN DEFAULT true,
+    error_message   TEXT,
+    skipped         BOOLEAN DEFAULT false,
+    skipped_reason  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS collection_stats_type_started_idx
+    ON telemetry.collection_stats(collection_type, started_at DESC);
+
+-- -----------------------------------------------------------------------------
+-- Helper: Check circuit breaker - should we skip collection?
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry._check_circuit_breaker(p_collection_type TEXT)
+RETURNS BOOLEAN
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_enabled BOOLEAN;
+    v_threshold_ms INTEGER;
+    v_last_duration_ms INTEGER;
+    v_last_started TIMESTAMPTZ;
+BEGIN
+    -- Check if circuit breaker is enabled
+    v_enabled := COALESCE(
+        telemetry._get_config('circuit_breaker_enabled', 'true')::boolean,
+        true
+    );
+
+    IF NOT v_enabled THEN
+        RETURN false;  -- Don't skip
+    END IF;
+
+    -- Get threshold
+    v_threshold_ms := COALESCE(
+        telemetry._get_config('circuit_breaker_threshold_ms', '5000')::integer,
+        5000
+    );
+
+    -- Get last successful collection duration
+    SELECT duration_ms, started_at
+    INTO v_last_duration_ms, v_last_started
+    FROM telemetry.collection_stats
+    WHERE collection_type = p_collection_type
+      AND success = true
+      AND skipped = false
+    ORDER BY started_at DESC
+    LIMIT 1;
+
+    -- Skip if last run exceeded threshold and was recent (within 5 minutes)
+    IF v_last_duration_ms IS NOT NULL
+       AND v_last_duration_ms > v_threshold_ms
+       AND v_last_started > now() - interval '5 minutes' THEN
+        RETURN true;  -- Skip this collection
+    END IF;
+
+    RETURN false;  -- Don't skip
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Helper: Record collection start
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry._record_collection_start(p_collection_type TEXT)
+RETURNS INTEGER
+LANGUAGE sql AS $$
+    INSERT INTO telemetry.collection_stats (collection_type, started_at)
+    VALUES (p_collection_type, now())
+    RETURNING id
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Helper: Record collection completion
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry._record_collection_end(
+    p_stat_id INTEGER,
+    p_success BOOLEAN,
+    p_error_message TEXT DEFAULT NULL
+)
+RETURNS VOID
+LANGUAGE sql AS $$
+    UPDATE telemetry.collection_stats
+    SET completed_at = now(),
+        duration_ms = EXTRACT(EPOCH FROM (now() - started_at)) * 1000,
+        success = p_success,
+        error_message = p_error_message
+    WHERE id = p_stat_id
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Helper: Record skipped collection
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry._record_collection_skip(
+    p_collection_type TEXT,
+    p_reason TEXT
+)
+RETURNS VOID
+LANGUAGE sql AS $$
+    INSERT INTO telemetry.collection_stats (
+        collection_type, started_at, completed_at, skipped, skipped_reason
+    )
+    VALUES (p_collection_type, now(), now(), true, p_reason)
+$$;
 
 -- -----------------------------------------------------------------------------
 -- Helper: Get config value with default
@@ -696,7 +814,24 @@ DECLARE
     v_enable_locks BOOLEAN;
     v_enable_progress BOOLEAN;
     v_pg_version INTEGER;
+    v_stat_id INTEGER;
+    v_should_skip BOOLEAN;
 BEGIN
+    -- P0 Safety: Check circuit breaker
+    v_should_skip := telemetry._check_circuit_breaker('sample');
+    IF v_should_skip THEN
+        PERFORM telemetry._record_collection_skip('sample', 'Circuit breaker tripped - last run exceeded threshold');
+        RAISE NOTICE 'pg-telemetry: Skipping sample collection due to circuit breaker';
+        RETURN v_captured_at;
+    END IF;
+
+    -- P0 Safety: Record collection start for circuit breaker
+    v_stat_id := telemetry._record_collection_start('sample');
+
+    -- P0 Safety: Set timeouts to prevent hanging
+    PERFORM set_config('statement_timeout', '5000', true);  -- 5 second limit
+    PERFORM set_config('lock_timeout', '1000', true);       -- 1 second lock wait
+
     -- Get configuration
     v_enable_locks := COALESCE(
         telemetry._get_config('enable_locks', 'true')::boolean,
@@ -713,200 +848,222 @@ BEGIN
     VALUES (v_captured_at)
     RETURNING id INTO v_sample_id;
 
-    -- Wait events (aggregated by backend_type, wait_event_type, wait_event, state)
-    -- Always captured - low overhead
-    INSERT INTO telemetry.wait_samples (sample_id, backend_type, wait_event_type, wait_event, state, count)
-    SELECT
-        v_sample_id,
-        COALESCE(backend_type, 'unknown'),
-        COALESCE(wait_event_type, 'Running'),
-        COALESCE(wait_event, 'CPU'),
-        COALESCE(state, 'unknown'),
-        count(*)::integer
-    FROM pg_stat_activity
-    WHERE pid != pg_backend_pid()
-    GROUP BY backend_type, wait_event_type, wait_event, state;
+    -- P0 Safety: Wait events with exception handling
+    BEGIN
+        INSERT INTO telemetry.wait_samples (sample_id, backend_type, wait_event_type, wait_event, state, count)
+        SELECT
+            v_sample_id,
+            COALESCE(backend_type, 'unknown'),
+            COALESCE(wait_event_type, 'Running'),
+            COALESCE(wait_event, 'CPU'),
+            COALESCE(state, 'unknown'),
+            count(*)::integer
+        FROM pg_stat_activity
+        WHERE pid != pg_backend_pid()
+        GROUP BY backend_type, wait_event_type, wait_event, state;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'pg-telemetry: Wait events collection failed: %', SQLERRM;
+    END;
 
-    -- Active sessions (top 25 by duration, non-idle)
-    -- Always captured - low overhead
-    INSERT INTO telemetry.activity_samples (
-        sample_id, pid, usename, application_name, backend_type,
-        state, wait_event_type, wait_event, query_start, state_change, query_preview
-    )
-    SELECT
-        v_sample_id,
-        pid,
-        usename,
-        application_name,
-        backend_type,
-        state,
-        wait_event_type,
-        wait_event,
-        query_start,
-        state_change,
-        left(query, 200)
-    FROM pg_stat_activity
-    WHERE state != 'idle' AND pid != pg_backend_pid()
-    ORDER BY query_start ASC NULLS LAST
-    LIMIT 25;
+    -- P0 Safety: Active sessions with exception handling
+    BEGIN
+        INSERT INTO telemetry.activity_samples (
+            sample_id, pid, usename, application_name, backend_type,
+            state, wait_event_type, wait_event, query_start, state_change, query_preview
+        )
+        SELECT
+            v_sample_id,
+            pid,
+            usename,
+            application_name,
+            backend_type,
+            state,
+            wait_event_type,
+            wait_event,
+            query_start,
+            state_change,
+            left(query, 200)
+        FROM pg_stat_activity
+        WHERE state != 'idle' AND pid != pg_backend_pid()
+        ORDER BY query_start ASC NULLS LAST
+        LIMIT 25;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'pg-telemetry: Activity samples collection failed: %', SQLERRM;
+    END;
 
-    -- Progress tracking (conditionally captured)
+    -- P0 Safety: Progress tracking with exception handling
     IF v_enable_progress THEN
-    -- Vacuum progress (handle PG17 column changes)
-    IF v_pg_version >= 17 THEN
+    BEGIN
+        -- Vacuum progress (handle PG17 column changes)
+        IF v_pg_version >= 17 THEN
+            INSERT INTO telemetry.progress_samples (
+                sample_id, progress_type, pid, relid, relname, phase,
+                blocks_total, blocks_done, tuples_total, tuples_done, details
+            )
+            SELECT
+                v_sample_id,
+                'vacuum',
+                p.pid,
+                p.relid,
+                p.relid::regclass::text,
+                p.phase,
+                p.heap_blks_total,
+                p.heap_blks_vacuumed,
+                p.max_dead_tuple_bytes,
+                p.dead_tuple_bytes,
+                jsonb_build_object(
+                    'heap_blks_scanned', p.heap_blks_scanned,
+                    'index_vacuum_count', p.index_vacuum_count,
+                    'num_dead_item_ids', p.num_dead_item_ids
+                )
+            FROM pg_stat_progress_vacuum p;
+        ELSE
+            INSERT INTO telemetry.progress_samples (
+                sample_id, progress_type, pid, relid, relname, phase,
+                blocks_total, blocks_done, tuples_total, tuples_done, details
+            )
+            SELECT
+                v_sample_id,
+                'vacuum',
+                p.pid,
+                p.relid,
+                p.relid::regclass::text,
+                p.phase,
+                p.heap_blks_total,
+                p.heap_blks_vacuumed,
+                p.max_dead_tuples,
+                p.num_dead_tuples,
+                jsonb_build_object(
+                    'heap_blks_scanned', p.heap_blks_scanned,
+                    'index_vacuum_count', p.index_vacuum_count
+                )
+            FROM pg_stat_progress_vacuum p;
+        END IF;
+
+        -- COPY progress
+        INSERT INTO telemetry.progress_samples (
+            sample_id, progress_type, pid, relid, relname, phase,
+            tuples_done, bytes_total, bytes_done, details
+        )
+        SELECT
+            v_sample_id,
+            'copy',
+            p.pid,
+            p.relid,
+            p.relid::regclass::text,
+            p.command || '/' || p.type,
+            p.tuples_processed,
+            p.bytes_total,
+            p.bytes_processed,
+            jsonb_build_object(
+                'tuples_excluded', p.tuples_excluded
+            )
+        FROM pg_stat_progress_copy p;
+
+        -- Analyze progress
+        INSERT INTO telemetry.progress_samples (
+            sample_id, progress_type, pid, relid, relname, phase,
+            blocks_total, blocks_done, details
+        )
+        SELECT
+            v_sample_id,
+            'analyze',
+            p.pid,
+            p.relid,
+            p.relid::regclass::text,
+            p.phase,
+            p.sample_blks_total,
+            p.sample_blks_scanned,
+            jsonb_build_object(
+                'ext_stats_total', p.ext_stats_total,
+                'ext_stats_computed', p.ext_stats_computed,
+                'child_tables_total', p.child_tables_total,
+                'child_tables_done', p.child_tables_done
+            )
+        FROM pg_stat_progress_analyze p;
+
+        -- Create index progress
         INSERT INTO telemetry.progress_samples (
             sample_id, progress_type, pid, relid, relname, phase,
             blocks_total, blocks_done, tuples_total, tuples_done, details
         )
         SELECT
             v_sample_id,
-            'vacuum',
+            'create_index',
             p.pid,
             p.relid,
             p.relid::regclass::text,
             p.phase,
-            p.heap_blks_total,
-            p.heap_blks_vacuumed,
-            p.max_dead_tuple_bytes,
-            p.dead_tuple_bytes,
+            p.blocks_total,
+            p.blocks_done,
+            p.tuples_total,
+            p.tuples_done,
             jsonb_build_object(
-                'heap_blks_scanned', p.heap_blks_scanned,
-                'index_vacuum_count', p.index_vacuum_count,
-                'num_dead_item_ids', p.num_dead_item_ids
+                'index_relid', p.index_relid,
+                'command', p.command,
+                'lockers_total', p.lockers_total,
+                'lockers_done', p.lockers_done,
+                'partitions_total', p.partitions_total,
+                'partitions_done', p.partitions_done
             )
-        FROM pg_stat_progress_vacuum p;
-    ELSE
-        INSERT INTO telemetry.progress_samples (
-            sample_id, progress_type, pid, relid, relname, phase,
-            blocks_total, blocks_done, tuples_total, tuples_done, details
-        )
-        SELECT
-            v_sample_id,
-            'vacuum',
-            p.pid,
-            p.relid,
-            p.relid::regclass::text,
-            p.phase,
-            p.heap_blks_total,
-            p.heap_blks_vacuumed,
-            p.max_dead_tuples,
-            p.num_dead_tuples,
-            jsonb_build_object(
-                'heap_blks_scanned', p.heap_blks_scanned,
-                'index_vacuum_count', p.index_vacuum_count
-            )
-        FROM pg_stat_progress_vacuum p;
-    END IF;
-
-    -- COPY progress
-    INSERT INTO telemetry.progress_samples (
-        sample_id, progress_type, pid, relid, relname, phase,
-        tuples_done, bytes_total, bytes_done, details
-    )
-    SELECT
-        v_sample_id,
-        'copy',
-        p.pid,
-        p.relid,
-        p.relid::regclass::text,
-        p.command || '/' || p.type,
-        p.tuples_processed,
-        p.bytes_total,
-        p.bytes_processed,
-        jsonb_build_object(
-            'tuples_excluded', p.tuples_excluded
-        )
-    FROM pg_stat_progress_copy p;
-
-    -- Analyze progress
-    INSERT INTO telemetry.progress_samples (
-        sample_id, progress_type, pid, relid, relname, phase,
-        blocks_total, blocks_done, details
-    )
-    SELECT
-        v_sample_id,
-        'analyze',
-        p.pid,
-        p.relid,
-        p.relid::regclass::text,
-        p.phase,
-        p.sample_blks_total,
-        p.sample_blks_scanned,
-        jsonb_build_object(
-            'ext_stats_total', p.ext_stats_total,
-            'ext_stats_computed', p.ext_stats_computed,
-            'child_tables_total', p.child_tables_total,
-            'child_tables_done', p.child_tables_done
-        )
-    FROM pg_stat_progress_analyze p;
-
-    -- Create index progress
-    INSERT INTO telemetry.progress_samples (
-        sample_id, progress_type, pid, relid, relname, phase,
-        blocks_total, blocks_done, tuples_total, tuples_done, details
-    )
-    SELECT
-        v_sample_id,
-        'create_index',
-        p.pid,
-        p.relid,
-        p.relid::regclass::text,
-        p.phase,
-        p.blocks_total,
-        p.blocks_done,
-        p.tuples_total,
-        p.tuples_done,
-        jsonb_build_object(
-            'index_relid', p.index_relid,
-            'command', p.command,
-            'lockers_total', p.lockers_total,
-            'lockers_done', p.lockers_done,
-            'partitions_total', p.partitions_total,
-            'partitions_done', p.partitions_done
-        )
-    FROM pg_stat_progress_create_index p;
+        FROM pg_stat_progress_create_index p;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'pg-telemetry: Progress tracking collection failed: %', SQLERRM;
+    END;
     END IF;  -- v_enable_progress
 
-    -- Lock sampling (conditionally captured)
+    -- P0 Safety: Lock sampling with exception handling (highest risk section)
     IF v_enable_locks THEN
-    -- Blocking locks
-    INSERT INTO telemetry.lock_samples (
-        sample_id, blocked_pid, blocked_user, blocked_app, blocked_query_preview, blocked_duration,
-        blocking_pid, blocking_user, blocking_app, blocking_query_preview, lock_type, locked_relation
-    )
-    SELECT DISTINCT ON (blocked.pid, blocking.pid)
-        v_sample_id,
-        blocked.pid,
-        blocked.usename,
-        blocked.application_name,
-        left(blocked.query, 200),
-        v_captured_at - blocked.query_start,
-        blocking.pid,
-        blocking.usename,
-        blocking.application_name,
-        left(blocking.query, 200),
-        bl.locktype,
-        CASE WHEN bl.relation IS NOT NULL THEN bl.relation::regclass::text ELSE NULL END
-    FROM pg_locks bl
-    JOIN pg_stat_activity blocked ON blocked.pid = bl.pid
-    JOIN pg_locks kl ON (
-        kl.locktype = bl.locktype AND
-        kl.database IS NOT DISTINCT FROM bl.database AND
-        kl.relation IS NOT DISTINCT FROM bl.relation AND
-        kl.page IS NOT DISTINCT FROM bl.page AND
-        kl.tuple IS NOT DISTINCT FROM bl.tuple AND
-        kl.virtualxid IS NOT DISTINCT FROM bl.virtualxid AND
-        kl.transactionid IS NOT DISTINCT FROM bl.transactionid AND
-        kl.classid IS NOT DISTINCT FROM bl.classid AND
-        kl.objid IS NOT DISTINCT FROM bl.objid AND
-        kl.objsubid IS NOT DISTINCT FROM bl.objsubid AND
-        kl.pid != bl.pid
-    )
-    JOIN pg_stat_activity blocking ON blocking.pid = kl.pid
-    WHERE NOT bl.granted AND kl.granted;
+    BEGIN
+        INSERT INTO telemetry.lock_samples (
+            sample_id, blocked_pid, blocked_user, blocked_app, blocked_query_preview, blocked_duration,
+            blocking_pid, blocking_user, blocking_app, blocking_query_preview, lock_type, locked_relation
+        )
+        SELECT DISTINCT ON (blocked.pid, blocking.pid)
+            v_sample_id,
+            blocked.pid,
+            blocked.usename,
+            blocked.application_name,
+            left(blocked.query, 200),
+            v_captured_at - blocked.query_start,
+            blocking.pid,
+            blocking.usename,
+            blocking.application_name,
+            left(blocking.query, 200),
+            bl.locktype,
+            CASE WHEN bl.relation IS NOT NULL THEN bl.relation::regclass::text ELSE NULL END
+        FROM pg_locks bl
+        JOIN pg_stat_activity blocked ON blocked.pid = bl.pid
+        JOIN pg_locks kl ON (
+            kl.locktype = bl.locktype AND
+            kl.database IS NOT DISTINCT FROM bl.database AND
+            kl.relation IS NOT DISTINCT FROM bl.relation AND
+            kl.page IS NOT DISTINCT FROM bl.page AND
+            kl.tuple IS NOT DISTINCT FROM bl.tuple AND
+            kl.virtualxid IS NOT DISTINCT FROM bl.virtualxid AND
+            kl.transactionid IS NOT DISTINCT FROM bl.transactionid AND
+            kl.classid IS NOT DISTINCT FROM bl.classid AND
+            kl.objid IS NOT DISTINCT FROM bl.objid AND
+            kl.objsubid IS NOT DISTINCT FROM bl.objsubid AND
+            kl.pid != bl.pid
+        )
+        JOIN pg_stat_activity blocking ON blocking.pid = kl.pid
+        WHERE NOT bl.granted AND kl.granted
+        LIMIT 100;  -- P0 Safety: Limit to top 100 blocking relationships
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'pg-telemetry: Lock sampling collection failed: %', SQLERRM;
+    END;
     END IF;  -- v_enable_locks
 
+    -- P0 Safety: Record successful completion
+    PERFORM telemetry._record_collection_end(v_stat_id, true, NULL);
+
     RETURN v_captured_at;
+EXCEPTION
+    WHEN OTHERS THEN
+        -- P0 Safety: Record failure if entire function fails
+        PERFORM telemetry._record_collection_end(v_stat_id, false, SQLERRM);
+        RAISE;
 END;
 $$;
 
@@ -938,29 +1095,58 @@ DECLARE
     v_io_client_write_time DOUBLE PRECISION;
     v_io_bgw_writes BIGINT;
     v_io_bgw_write_time DOUBLE PRECISION;
+    v_stat_id INTEGER;
+    v_should_skip BOOLEAN;
 BEGIN
+    -- P0 Safety: Check circuit breaker
+    v_should_skip := telemetry._check_circuit_breaker('snapshot');
+    IF v_should_skip THEN
+        PERFORM telemetry._record_collection_skip('snapshot', 'Circuit breaker tripped - last run exceeded threshold');
+        RAISE NOTICE 'pg-telemetry: Skipping snapshot collection due to circuit breaker';
+        RETURN v_captured_at;
+    END IF;
+
+    -- P0 Safety: Record collection start for circuit breaker
+    v_stat_id := telemetry._record_collection_start('snapshot');
+
+    -- P0 Safety: Set timeouts to prevent hanging
+    PERFORM set_config('statement_timeout', '5000', true);  -- 5 second limit
+    PERFORM set_config('lock_timeout', '1000', true);       -- 1 second lock wait
+
     v_pg_version := telemetry._pg_version();
 
-    -- Count active autovacuum workers
-    SELECT count(*)::integer INTO v_autovacuum_workers
-    FROM pg_stat_activity
-    WHERE backend_type = 'autovacuum worker';
+    -- P0 Safety: Collect system stats with exception handling
+    BEGIN
+        -- Count active autovacuum workers
+        SELECT count(*)::integer INTO v_autovacuum_workers
+        FROM pg_stat_activity
+        WHERE backend_type = 'autovacuum worker';
 
-    -- Replication slot stats
-    SELECT
-        count(*)::integer,
-        COALESCE(max(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)), 0)
-    INTO v_slots_count, v_slots_max_retained
-    FROM pg_replication_slots;
+        -- Replication slot stats
+        SELECT
+            count(*)::integer,
+            COALESCE(max(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)), 0)
+        INTO v_slots_count, v_slots_max_retained
+        FROM pg_replication_slots;
 
-    -- Temp file stats (current database)
-    SELECT COALESCE(temp_files, 0), COALESCE(temp_bytes, 0)
-    INTO v_temp_files, v_temp_bytes
-    FROM pg_stat_database
-    WHERE datname = current_database();
+        -- Temp file stats (current database)
+        SELECT COALESCE(temp_files, 0), COALESCE(temp_bytes, 0)
+        INTO v_temp_files, v_temp_bytes
+        FROM pg_stat_database
+        WHERE datname = current_database();
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'pg-telemetry: System stats collection failed: %', SQLERRM;
+        -- Set defaults so snapshot can continue
+        v_autovacuum_workers := 0;
+        v_slots_count := 0;
+        v_slots_max_retained := 0;
+        v_temp_files := 0;
+        v_temp_bytes := 0;
+    END;
 
-    -- pg_stat_io (PG16+)
+    -- P0 Safety: pg_stat_io collection with exception handling (PG16+)
     IF v_pg_version >= 16 THEN
+    BEGIN
         -- Checkpointer I/O
         SELECT COALESCE(sum(writes), 0), COALESCE(sum(write_time), 0),
                COALESCE(sum(fsyncs), 0), COALESCE(sum(fsync_time), 0)
@@ -981,6 +1167,20 @@ BEGIN
         SELECT COALESCE(sum(writes), 0), COALESCE(sum(write_time), 0)
         INTO v_io_bgw_writes, v_io_bgw_write_time
         FROM pg_stat_io WHERE backend_type = 'background writer';
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'pg-telemetry: pg_stat_io collection failed: %', SQLERRM;
+        -- Set defaults
+        v_io_ckpt_writes := 0;
+        v_io_ckpt_write_time := 0;
+        v_io_ckpt_fsyncs := 0;
+        v_io_ckpt_fsync_time := 0;
+        v_io_av_writes := 0;
+        v_io_av_write_time := 0;
+        v_io_client_writes := 0;
+        v_io_client_write_time := 0;
+        v_io_bgw_writes := 0;
+        v_io_bgw_write_time := 0;
+    END;
     END IF;
 
     IF v_pg_version = 17 THEN
@@ -1081,61 +1281,69 @@ BEGIN
         RAISE EXCEPTION 'Unsupported PostgreSQL version: %. Requires 15, 16, or 17.', v_pg_version;
     END IF;
 
-    -- Capture stats for tracked tables
-    INSERT INTO telemetry.table_snapshots (
-        snapshot_id, relid, schemaname, relname,
-        pg_relation_size, pg_total_relation_size, pg_indexes_size,
-        n_live_tup, n_dead_tup,
-        n_tup_ins, n_tup_upd, n_tup_del, n_tup_hot_upd,
-        last_vacuum, last_autovacuum, last_analyze, last_autoanalyze,
-        vacuum_count, autovacuum_count, analyze_count, autoanalyze_count
-    )
-    SELECT
-        v_snapshot_id,
-        t.relid,
-        t.schemaname,
-        t.relname,
-        pg_relation_size(t.relid),
-        pg_total_relation_size(t.relid),
-        pg_indexes_size(t.relid),
-        s.n_live_tup,
-        s.n_dead_tup,
-        s.n_tup_ins,
-        s.n_tup_upd,
-        s.n_tup_del,
-        s.n_tup_hot_upd,
-        s.last_vacuum,
-        s.last_autovacuum,
-        s.last_analyze,
-        s.last_autoanalyze,
-        s.vacuum_count,
-        s.autovacuum_count,
-        s.analyze_count,
-        s.autoanalyze_count
-    FROM telemetry.tracked_tables t
-    JOIN pg_stat_user_tables s ON s.relid = t.relid;
+    -- P0 Safety: Capture stats for tracked tables with exception handling
+    BEGIN
+        INSERT INTO telemetry.table_snapshots (
+            snapshot_id, relid, schemaname, relname,
+            pg_relation_size, pg_total_relation_size, pg_indexes_size,
+            n_live_tup, n_dead_tup,
+            n_tup_ins, n_tup_upd, n_tup_del, n_tup_hot_upd,
+            last_vacuum, last_autovacuum, last_analyze, last_autoanalyze,
+            vacuum_count, autovacuum_count, analyze_count, autoanalyze_count
+        )
+        SELECT
+            v_snapshot_id,
+            t.relid,
+            t.schemaname,
+            t.relname,
+            pg_relation_size(t.relid),
+            pg_total_relation_size(t.relid),
+            pg_indexes_size(t.relid),
+            s.n_live_tup,
+            s.n_dead_tup,
+            s.n_tup_ins,
+            s.n_tup_upd,
+            s.n_tup_del,
+            s.n_tup_hot_upd,
+            s.last_vacuum,
+            s.last_autovacuum,
+            s.last_analyze,
+            s.last_autoanalyze,
+            s.vacuum_count,
+            s.autovacuum_count,
+            s.analyze_count,
+            s.autoanalyze_count
+        FROM telemetry.tracked_tables t
+        JOIN pg_stat_user_tables s ON s.relid = t.relid;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'pg-telemetry: Tracked tables collection failed: %', SQLERRM;
+    END;
 
-    -- Capture replication stats (if any replicas connected)
-    INSERT INTO telemetry.replication_snapshots (
-        snapshot_id, pid, client_addr, application_name, state, sync_state,
-        sent_lsn, write_lsn, flush_lsn, replay_lsn,
-        write_lag, flush_lag, replay_lag
-    )
-    SELECT
-        v_snapshot_id,
-        pid,
-        client_addr,
-        application_name,
-        state,
-        sync_state,
-        sent_lsn,
-        write_lsn,
-        flush_lsn,
-        replay_lsn,
-        write_lag,
-        flush_lag,
-        replay_lag
-    FROM pg_stat_replication;
+    -- P0 Safety: Capture replication stats with exception handling
+    BEGIN
+        INSERT INTO telemetry.replication_snapshots (
+            snapshot_id, pid, client_addr, application_name, state, sync_state,
+            sent_lsn, write_lsn, flush_lsn, replay_lsn,
+            write_lag, flush_lag, replay_lag
+        )
+        SELECT
+            v_snapshot_id,
+            pid,
+            client_addr,
+            application_name,
+            state,
+            sync_state,
+            sent_lsn,
+            write_lsn,
+            flush_lsn,
+            replay_lsn,
+            write_lag,
+            flush_lag,
+            replay_lag
+        FROM pg_stat_replication;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'pg-telemetry: Replication stats collection failed: %', SQLERRM;
+    END;
 
     -- Capture pg_stat_statements (if available and enabled)
     IF telemetry._has_pg_stat_statements()
@@ -1181,10 +1389,20 @@ BEGIN
         EXCEPTION
             WHEN undefined_table THEN NULL;
             WHEN undefined_column THEN NULL;
+            WHEN OTHERS THEN
+                RAISE WARNING 'pg-telemetry: pg_stat_statements collection failed: %', SQLERRM;
         END;
     END IF;
 
+    -- P0 Safety: Record successful completion
+    PERFORM telemetry._record_collection_end(v_stat_id, true, NULL);
+
     RETURN v_captured_at;
+EXCEPTION
+    WHEN OTHERS THEN
+        -- P0 Safety: Record failure if entire function fails
+        PERFORM telemetry._record_collection_end(v_stat_id, false, SQLERRM);
+        RAISE;
 END;
 $$;
 

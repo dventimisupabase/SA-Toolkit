@@ -152,6 +152,61 @@ SELECT telemetry.enable();
 - `disable()` - Unschedules all 3 cron jobs, stops collection completely
 - `enable()` - Re-schedules jobs based on current mode setting
 
+## Safety Features
+
+pg-telemetry includes P0 production safety mechanisms to prevent the observer from becoming part of the problem:
+
+### 1. Statement & Lock Timeouts
+
+Collection functions have built-in timeouts to prevent hanging:
+- **Statement timeout**: 5 seconds (entire function must complete)
+- **Lock timeout**: 1 second (max wait for locks)
+
+If a collection query hangs due to contended system catalogs, it will be automatically terminated rather than consuming resources indefinitely.
+
+### 2. Graceful Degradation
+
+Each collection section is wrapped in exception handlers. If one part fails, the rest continues:
+- Wait events fail → Activity samples still collected
+- Lock detection fails → Progress tracking still works
+- Partial data is better than no data during incidents
+
+Failures generate PostgreSQL warnings visible in logs but don't abort the entire collection.
+
+### 3. Circuit Breaker
+
+Automatic protection against slow or stuck collectors:
+
+```sql
+-- View circuit breaker status and collection performance
+SELECT collection_type, started_at, duration_ms, success, skipped
+FROM telemetry.collection_stats
+ORDER BY started_at DESC
+LIMIT 20;
+```
+
+**How it works:**
+- If any collection takes >5 seconds (configurable), next run is automatically skipped
+- Prevents cascading failures when system is stressed
+- Auto-resumes after 5 minutes if system recovers
+- Skipped collections are logged with reason
+
+**Configuration:**
+```sql
+-- Adjust threshold (milliseconds)
+UPDATE telemetry.config SET value = '10000' WHERE key = 'circuit_breaker_threshold_ms';
+
+-- Disable circuit breaker (not recommended for production)
+UPDATE telemetry.config SET value = 'false' WHERE key = 'circuit_breaker_enabled';
+```
+
+### 4. Limited Result Sets
+
+Safety limits on expensive queries:
+- Lock detection: Top 100 blocking relationships (prevents O(n²) explosion)
+- Active sessions: Top 25 (prevents excessive row capture)
+- pg_stat_statements: Top 50 queries (configurable)
+
 ## Anomaly Detection
 
 Automatically detects 6 common issues:
@@ -196,7 +251,7 @@ The test suite uses [pgTAP](https://pgtap.org/) via `supabase test db`.
 # Ensure local Supabase is running
 supabase start
 
-# Run all tests (67 tests)
+# Run all tests (88 tests)
 supabase test db
 ```
 
@@ -204,14 +259,15 @@ supabase test db
 
 | Category | Tests | Description |
 |----------|-------|-------------|
-| Installation Verification | 15 | Schema, tables, views, functions |
-| Function Existence | 21 | All 21 functions present |
+| Installation Verification | 16 | Schema, 12 tables, 7 views |
+| Function Existence | 23 | All functions including P0 safety helpers |
 | Core Functionality | 10 | snapshot(), sample(), config |
 | Table Tracking | 5 | track/untrack/list operations |
 | Analysis Functions | 8 | compare(), wait_summary(), anomaly_report(), etc. |
 | Configuration | 5 | get_mode(), set_mode() |
 | Views | 5 | All views queryable |
 | Kill Switch | 6 | disable(), enable() |
+| P0 Safety Features | 10 | Circuit breaker, exception handling, stats tracking |
 
 ## Standalone Installation (Non-Supabase)
 

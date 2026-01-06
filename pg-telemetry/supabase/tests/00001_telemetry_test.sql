@@ -6,16 +6,16 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(73);  -- Total number of tests
+SELECT plan(88);  -- Total number of tests (73 + 15 P0 safety tests)
 
 -- =============================================================================
--- 1. INSTALLATION VERIFICATION (15 tests)
+-- 1. INSTALLATION VERIFICATION (16 tests)
 -- =============================================================================
 
 -- Test schema exists
 SELECT has_schema('telemetry', 'Schema telemetry should exist');
 
--- Test all 11 tables exist
+-- Test all 12 tables exist (11 original + 1 collection_stats)
 SELECT has_table('telemetry', 'snapshots', 'Table telemetry.snapshots should exist');
 SELECT has_table('telemetry', 'tracked_tables', 'Table telemetry.tracked_tables should exist');
 SELECT has_table('telemetry', 'table_snapshots', 'Table telemetry.table_snapshots should exist');
@@ -27,6 +27,7 @@ SELECT has_table('telemetry', 'activity_samples', 'Table telemetry.activity_samp
 SELECT has_table('telemetry', 'progress_samples', 'Table telemetry.progress_samples should exist');
 SELECT has_table('telemetry', 'lock_samples', 'Table telemetry.lock_samples should exist');
 SELECT has_table('telemetry', 'config', 'Table telemetry.config should exist');
+SELECT has_table('telemetry', 'collection_stats', 'P0 Safety: Table telemetry.collection_stats should exist');
 
 -- Test all 7 views exist
 SELECT has_view('telemetry', 'deltas', 'View telemetry.deltas should exist');
@@ -34,13 +35,17 @@ SELECT has_view('telemetry', 'table_deltas', 'View telemetry.table_deltas should
 SELECT has_view('telemetry', 'recent_waits', 'View telemetry.recent_waits should exist');
 
 -- =============================================================================
--- 2. FUNCTION EXISTENCE (19 tests)
+-- 2. FUNCTION EXISTENCE (23 tests)
 -- =============================================================================
 
 SELECT has_function('telemetry', '_pg_version', 'Function telemetry._pg_version should exist');
 SELECT has_function('telemetry', '_get_config', 'Function telemetry._get_config should exist');
 SELECT has_function('telemetry', '_has_pg_stat_statements', 'Function telemetry._has_pg_stat_statements should exist');
 SELECT has_function('telemetry', '_pretty_bytes', 'Function telemetry._pretty_bytes should exist');
+SELECT has_function('telemetry', '_check_circuit_breaker', 'P0 Safety: Function telemetry._check_circuit_breaker should exist');
+SELECT has_function('telemetry', '_record_collection_start', 'P0 Safety: Function telemetry._record_collection_start should exist');
+SELECT has_function('telemetry', '_record_collection_end', 'P0 Safety: Function telemetry._record_collection_end should exist');
+SELECT has_function('telemetry', '_record_collection_skip', 'P0 Safety: Function telemetry._record_collection_skip should exist');
 SELECT has_function('telemetry', 'snapshot', 'Function telemetry.snapshot should exist');
 SELECT has_function('telemetry', 'sample', 'Function telemetry.sample should exist');
 SELECT has_function('telemetry', 'track_table', 'Function telemetry.track_table should exist');
@@ -375,6 +380,83 @@ SELECT ok(
     (SELECT count(*) FROM cron.job WHERE jobname LIKE 'telemetry%') = 3,
     'All 3 telemetry cron jobs should be rescheduled after enable()'
 );
+
+-- =============================================================================
+-- 9. P0 SAFETY FEATURES (10 tests)
+-- =============================================================================
+
+-- Test circuit breaker configuration exists
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.config WHERE key = 'circuit_breaker_enabled'),
+    'P0 Safety: Circuit breaker config should exist'
+);
+
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.config WHERE key = 'circuit_breaker_threshold_ms'),
+    'P0 Safety: Circuit breaker threshold config should exist'
+);
+
+-- Test collection stats are recorded for sample()
+SELECT lives_ok(
+    $$SELECT telemetry.sample()$$,
+    'P0 Safety: sample() with stats tracking should execute without error'
+);
+
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.collection_stats WHERE collection_type = 'sample'),
+    'P0 Safety: Collection stats should be recorded for sample()'
+);
+
+SELECT ok(
+    (SELECT success FROM telemetry.collection_stats WHERE collection_type = 'sample' ORDER BY started_at DESC LIMIT 1) = true,
+    'P0 Safety: Last sample collection should be marked as successful'
+);
+
+-- Test collection stats are recorded for snapshot()
+SELECT lives_ok(
+    $$SELECT telemetry.snapshot()$$,
+    'P0 Safety: snapshot() with stats tracking should execute without error'
+);
+
+SELECT ok(
+    EXISTS (SELECT 1 FROM telemetry.collection_stats WHERE collection_type = 'snapshot'),
+    'P0 Safety: Collection stats should be recorded for snapshot()'
+);
+
+SELECT ok(
+    (SELECT success FROM telemetry.collection_stats WHERE collection_type = 'snapshot' ORDER BY started_at DESC LIMIT 1) = true,
+    'P0 Safety: Last snapshot collection should be marked as successful'
+);
+
+-- Test circuit breaker can be triggered
+UPDATE telemetry.config SET value = '100' WHERE key = 'circuit_breaker_threshold_ms';
+
+-- Clear existing sample collections to ensure our fake one is the most recent
+DELETE FROM telemetry.collection_stats WHERE collection_type = 'sample';
+
+-- Insert a fake long-running collection (most recent)
+INSERT INTO telemetry.collection_stats (collection_type, started_at, completed_at, duration_ms, success)
+VALUES ('sample', now(), now(), 10000, true);
+
+-- Circuit breaker should now skip
+SELECT ok(
+    telemetry._check_circuit_breaker('sample') = true,
+    'P0 Safety: Circuit breaker should trip after threshold exceeded'
+);
+
+-- Reset threshold
+UPDATE telemetry.config SET value = '5000' WHERE key = 'circuit_breaker_threshold_ms';
+
+-- Test circuit breaker can be disabled
+UPDATE telemetry.config SET value = 'false' WHERE key = 'circuit_breaker_enabled';
+
+SELECT ok(
+    telemetry._check_circuit_breaker('sample') = false,
+    'P0 Safety: Circuit breaker should not trip when disabled'
+);
+
+-- Re-enable
+UPDATE telemetry.config SET value = 'true' WHERE key = 'circuit_breaker_enabled';
 
 SELECT * FROM finish();
 ROLLBACK;
