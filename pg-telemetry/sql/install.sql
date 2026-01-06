@@ -695,6 +695,7 @@ DECLARE
     v_captured_at TIMESTAMPTZ := now();
     v_enable_locks BOOLEAN;
     v_enable_progress BOOLEAN;
+    v_pg_version INTEGER;
 BEGIN
     -- Get configuration
     v_enable_locks := COALESCE(
@@ -705,6 +706,7 @@ BEGIN
         telemetry._get_config('enable_progress', 'true')::boolean,
         TRUE
     );
+    v_pg_version := telemetry._pg_version();
 
     -- Create sample record
     INSERT INTO telemetry.samples (captured_at)
@@ -750,27 +752,51 @@ BEGIN
 
     -- Progress tracking (conditionally captured)
     IF v_enable_progress THEN
-    -- Vacuum progress
-    INSERT INTO telemetry.progress_samples (
-        sample_id, progress_type, pid, relid, relname, phase,
-        blocks_total, blocks_done, tuples_total, tuples_done, details
-    )
-    SELECT
-        v_sample_id,
-        'vacuum',
-        p.pid,
-        p.relid,
-        p.relid::regclass::text,
-        p.phase,
-        p.heap_blks_total,
-        p.heap_blks_vacuumed,
-        p.max_dead_tuples,
-        p.num_dead_tuples,
-        jsonb_build_object(
-            'heap_blks_scanned', p.heap_blks_scanned,
-            'index_vacuum_count', p.index_vacuum_count
+    -- Vacuum progress (handle PG17 column changes)
+    IF v_pg_version >= 17 THEN
+        INSERT INTO telemetry.progress_samples (
+            sample_id, progress_type, pid, relid, relname, phase,
+            blocks_total, blocks_done, tuples_total, tuples_done, details
         )
-    FROM pg_stat_progress_vacuum p;
+        SELECT
+            v_sample_id,
+            'vacuum',
+            p.pid,
+            p.relid,
+            p.relid::regclass::text,
+            p.phase,
+            p.heap_blks_total,
+            p.heap_blks_vacuumed,
+            p.max_dead_tuple_bytes,
+            p.dead_tuple_bytes,
+            jsonb_build_object(
+                'heap_blks_scanned', p.heap_blks_scanned,
+                'index_vacuum_count', p.index_vacuum_count,
+                'num_dead_item_ids', p.num_dead_item_ids
+            )
+        FROM pg_stat_progress_vacuum p;
+    ELSE
+        INSERT INTO telemetry.progress_samples (
+            sample_id, progress_type, pid, relid, relname, phase,
+            blocks_total, blocks_done, tuples_total, tuples_done, details
+        )
+        SELECT
+            v_sample_id,
+            'vacuum',
+            p.pid,
+            p.relid,
+            p.relid::regclass::text,
+            p.phase,
+            p.heap_blks_total,
+            p.heap_blks_vacuumed,
+            p.max_dead_tuples,
+            p.num_dead_tuples,
+            jsonb_build_object(
+                'heap_blks_scanned', p.heap_blks_scanned,
+                'index_vacuum_count', p.index_vacuum_count
+            )
+        FROM pg_stat_progress_vacuum p;
+    END IF;
 
     -- COPY progress
     INSERT INTO telemetry.progress_samples (
