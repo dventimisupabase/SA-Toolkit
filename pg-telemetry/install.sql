@@ -525,13 +525,15 @@ CREATE INDEX IF NOT EXISTS samples_captured_at_idx ON telemetry.samples(captured
 -- -----------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS telemetry.wait_samples (
-    sample_id           INTEGER REFERENCES telemetry.samples(id) ON DELETE CASCADE,
+    sample_id           INTEGER,
+    sample_captured_at  TIMESTAMPTZ,
     backend_type        TEXT NOT NULL,
     wait_event_type     TEXT NOT NULL,
     wait_event          TEXT NOT NULL,
     state               TEXT NOT NULL,
     count               INTEGER NOT NULL,
-    PRIMARY KEY (sample_id, backend_type, wait_event_type, wait_event, state)
+    PRIMARY KEY (sample_id, backend_type, wait_event_type, wait_event, state),
+    FOREIGN KEY (sample_id, sample_captured_at) REFERENCES telemetry.samples(id, captured_at) ON DELETE CASCADE
 );
 
 -- -----------------------------------------------------------------------------
@@ -539,7 +541,8 @@ CREATE TABLE IF NOT EXISTS telemetry.wait_samples (
 -- -----------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS telemetry.activity_samples (
-    sample_id           INTEGER REFERENCES telemetry.samples(id) ON DELETE CASCADE,
+    sample_id           INTEGER,
+    sample_captured_at  TIMESTAMPTZ,
     pid                 INTEGER NOT NULL,
     usename             TEXT,
     application_name    TEXT,
@@ -550,7 +553,8 @@ CREATE TABLE IF NOT EXISTS telemetry.activity_samples (
     query_start         TIMESTAMPTZ,
     state_change        TIMESTAMPTZ,
     query_preview       TEXT,
-    PRIMARY KEY (sample_id, pid)
+    PRIMARY KEY (sample_id, pid),
+    FOREIGN KEY (sample_id, sample_captured_at) REFERENCES telemetry.samples(id, captured_at) ON DELETE CASCADE
 );
 
 -- -----------------------------------------------------------------------------
@@ -558,7 +562,8 @@ CREATE TABLE IF NOT EXISTS telemetry.activity_samples (
 -- -----------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS telemetry.progress_samples (
-    sample_id           INTEGER REFERENCES telemetry.samples(id) ON DELETE CASCADE,
+    sample_id           INTEGER,
+    sample_captured_at  TIMESTAMPTZ,
     progress_type       TEXT NOT NULL,      -- 'vacuum', 'copy', 'analyze', 'create_index'
     pid                 INTEGER NOT NULL,
     relid               OID,
@@ -571,7 +576,8 @@ CREATE TABLE IF NOT EXISTS telemetry.progress_samples (
     bytes_total         BIGINT,
     bytes_done          BIGINT,
     details             JSONB,              -- Type-specific additional fields
-    PRIMARY KEY (sample_id, progress_type, pid)
+    PRIMARY KEY (sample_id, progress_type, pid),
+    FOREIGN KEY (sample_id, sample_captured_at) REFERENCES telemetry.samples(id, captured_at) ON DELETE CASCADE
 );
 
 -- -----------------------------------------------------------------------------
@@ -579,7 +585,8 @@ CREATE TABLE IF NOT EXISTS telemetry.progress_samples (
 -- -----------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS telemetry.lock_samples (
-    sample_id               INTEGER REFERENCES telemetry.samples(id) ON DELETE CASCADE,
+    sample_id               INTEGER,
+    sample_captured_at  TIMESTAMPTZ,
     blocked_pid             INTEGER NOT NULL,
     blocked_user            TEXT,
     blocked_app             TEXT,
@@ -591,7 +598,8 @@ CREATE TABLE IF NOT EXISTS telemetry.lock_samples (
     blocking_query_preview  TEXT,
     lock_type               TEXT,
     locked_relation         TEXT,
-    PRIMARY KEY (sample_id, blocked_pid, blocking_pid)
+    PRIMARY KEY (sample_id, blocked_pid, blocking_pid),
+    FOREIGN KEY (sample_id, sample_captured_at) REFERENCES telemetry.samples(id, captured_at) ON DELETE CASCADE
 );
 
 -- -----------------------------------------------------------------------------
@@ -1211,9 +1219,10 @@ BEGIN
 
     -- P0 Safety: Wait events with exception handling
     BEGIN
-        INSERT INTO telemetry.wait_samples (sample_id, backend_type, wait_event_type, wait_event, state, count)
+        INSERT INTO telemetry.wait_samples (sample_id, sample_captured_at, backend_type, wait_event_type, wait_event, state, count)
         SELECT
             v_sample_id,
+            v_captured_at,
             COALESCE(backend_type, 'unknown'),
             COALESCE(wait_event_type, 'Running'),
             COALESCE(wait_event, 'CPU'),
@@ -1251,11 +1260,12 @@ BEGIN
             ELSE
                 -- Safe to collect activity samples
                 INSERT INTO telemetry.activity_samples (
-                    sample_id, pid, usename, application_name, backend_type,
+                    sample_id, sample_captured_at, pid, usename, application_name, backend_type,
                     state, wait_event_type, wait_event, query_start, state_change, query_preview
                 )
                 SELECT
                     v_sample_id,
+                    v_captured_at,
                     pid,
                     usename,
                     application_name,
@@ -1284,11 +1294,12 @@ BEGIN
         -- Vacuum progress (handle PG17 column changes)
         IF v_pg_version >= 17 THEN
             INSERT INTO telemetry.progress_samples (
-                sample_id, progress_type, pid, relid, relname, phase,
+                sample_id, sample_captured_at, progress_type, pid, relid, relname, phase,
                 blocks_total, blocks_done, tuples_total, tuples_done, details
             )
             SELECT
                 v_sample_id,
+                v_captured_at,
                 'vacuum',
                 p.pid,
                 p.relid,
@@ -1306,11 +1317,12 @@ BEGIN
             FROM pg_stat_progress_vacuum p;
         ELSE
             INSERT INTO telemetry.progress_samples (
-                sample_id, progress_type, pid, relid, relname, phase,
+                sample_id, sample_captured_at, progress_type, pid, relid, relname, phase,
                 blocks_total, blocks_done, tuples_total, tuples_done, details
             )
             SELECT
                 v_sample_id,
+                v_captured_at,
                 'vacuum',
                 p.pid,
                 p.relid,
@@ -1329,11 +1341,12 @@ BEGIN
 
         -- COPY progress
         INSERT INTO telemetry.progress_samples (
-            sample_id, progress_type, pid, relid, relname, phase,
+            sample_id, sample_captured_at, progress_type, pid, relid, relname, phase,
             tuples_done, bytes_total, bytes_done, details
         )
         SELECT
             v_sample_id,
+            v_captured_at,
             'copy',
             p.pid,
             p.relid,
@@ -1349,11 +1362,12 @@ BEGIN
 
         -- Analyze progress
         INSERT INTO telemetry.progress_samples (
-            sample_id, progress_type, pid, relid, relname, phase,
+            sample_id, sample_captured_at, progress_type, pid, relid, relname, phase,
             blocks_total, blocks_done, details
         )
         SELECT
             v_sample_id,
+            v_captured_at,
             'analyze',
             p.pid,
             p.relid,
@@ -1371,11 +1385,12 @@ BEGIN
 
         -- Create index progress
         INSERT INTO telemetry.progress_samples (
-            sample_id, progress_type, pid, relid, relname, phase,
+            sample_id, sample_captured_at, progress_type, pid, relid, relname, phase,
             blocks_total, blocks_done, tuples_total, tuples_done, details
         )
         SELECT
             v_sample_id,
+            v_captured_at,
             'create_index',
             p.pid,
             p.relid,
@@ -1427,7 +1442,7 @@ BEGIN
             ELSE
                 -- Safe to collect lock samples
                 INSERT INTO telemetry.lock_samples (
-                    sample_id, blocked_pid, blocked_user, blocked_app, blocked_query_preview, blocked_duration,
+                    sample_id, sample_captured_at, blocked_pid, blocked_user, blocked_app, blocked_query_preview, blocked_duration,
                     blocking_pid, blocking_user, blocking_app, blocking_query_preview, lock_type, locked_relation
                 )
                 WITH blocked_locks AS (
@@ -1443,6 +1458,7 @@ BEGIN
                 )
                 SELECT DISTINCT ON (blocked.pid, blocking.pid)
             v_sample_id,
+            v_captured_at,
             blocked.pid,
             blocked.usename,
             blocked.application_name,

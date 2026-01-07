@@ -6,7 +6,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(127);  -- Total number of tests (73 + 15 P0 + 8 P1 + 12 P2 + 9 P3 + 10 P4 = 127)
+SELECT plan(131);  -- Total number of tests (73 + 15 P0 + 8 P1 + 12 P2 + 9 P3 + 10 P4 = 127 + 4 FK tests)
 
 -- =============================================================================
 -- 1. INSTALLATION VERIFICATION (16 tests)
@@ -28,6 +28,48 @@ SELECT has_table('telemetry', 'progress_samples', 'Table telemetry.progress_samp
 SELECT has_table('telemetry', 'lock_samples', 'Table telemetry.lock_samples should exist');
 SELECT has_table('telemetry', 'config', 'Table telemetry.config should exist');
 SELECT has_table('telemetry', 'collection_stats', 'P0 Safety: Table telemetry.collection_stats should exist');
+
+-- Test Foreign Keys (Ensure partitioning support)
+-- Using manual catalog check because pgTAP's fk_ok has issues with partitioned tables in this env
+SELECT ok(
+    EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'telemetry.wait_samples'::regclass
+          AND confrelid = 'telemetry.samples'::regclass
+          AND contype = 'f'
+    ),
+    'wait_samples should have FK to samples'
+);
+
+SELECT ok(
+    EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'telemetry.activity_samples'::regclass
+          AND confrelid = 'telemetry.samples'::regclass
+          AND contype = 'f'
+    ),
+    'activity_samples should have FK to samples'
+);
+
+SELECT ok(
+    EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'telemetry.progress_samples'::regclass
+          AND confrelid = 'telemetry.samples'::regclass
+          AND contype = 'f'
+    ),
+    'progress_samples should have FK to samples'
+);
+
+SELECT ok(
+    EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'telemetry.lock_samples'::regclass
+          AND confrelid = 'telemetry.samples'::regclass
+          AND contype = 'f'
+    ),
+    'lock_samples should have FK to samples'
+);
 
 -- Test all 7 views exist
 SELECT has_view('telemetry', 'deltas', 'View telemetry.deltas should exist');
