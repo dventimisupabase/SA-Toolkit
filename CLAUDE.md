@@ -16,16 +16,16 @@ Each tool has its own README with detailed documentation. See individual READMEs
 
 ## Tools
 
-### pg-telemetry/
+### pg-flight-recorder/
 
 Server-side performance telemetry for PostgreSQL 15, 16, or 17. Continuously collects metrics and provides analysis functions to diagnose any time window.
 
-**See:** [pg-telemetry/README.md](pg-telemetry/README.md)
+**See:** [pg-flight-recorder/README.md](pg-flight-recorder/README.md)
 
 **Quick Reference:**
 ```bash
-psql -f pg-telemetry/install.sql    # Install
-psql -f pg-telemetry/uninstall.sql  # Uninstall
+psql -f pg-flight-recorder/install.sql    # Install
+psql -f pg-flight-recorder/uninstall.sql  # Uninstall
 ```
 
 ```sql
