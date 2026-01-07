@@ -1,8 +1,8 @@
-# pg-telemetry
+# pg-flight-recorder
 
 **"What was happening in my database?"**
 
-Server-side performance telemetry for PostgreSQL. Runs entirely inside your database using standard extensions.
+Server-side performance flight recorder for PostgreSQL. Runs entirely inside your database using standard extensions.
 Think of it as "Active Session History" (ASH) for Supabase and RDS.
 
 ## 🚀 Quick Start
@@ -25,29 +25,581 @@ Once installed, it runs automatically. Use these SQL queries to see what's happe
 
 | Goal                       | Query                                                                             |
 |----------------------------|-----------------------------------------------------------------------------------|
-| **See current activity**   | `SELECT * FROM telemetry.recent_activity;`                                        |
-| **Diagnose a slow period** | `SELECT * FROM telemetry.compare('2024-01-01 10:00', '2024-01-01 11:00');`        |
-| **Find what's waiting**    | `SELECT * FROM telemetry.wait_summary('2024-01-01 10:00', '2024-01-01 11:00');`   |
-| **Auto-detect issues**     | `SELECT * FROM telemetry.anomaly_report('2024-01-01 10:00', '2024-01-01 11:00');` |
+| **See current activity**   | `SELECT * FROM flight_recorder.recent_activity;`                                        |
+| **Diagnose a slow period** | `SELECT * FROM flight_recorder.compare('2024-01-01 10:00', '2024-01-01 11:00');`        |
+| **Find what's waiting**    | `SELECT * FROM flight_recorder.wait_summary('2024-01-01 10:00', '2024-01-01 11:00');`   |
+| **Auto-detect issues**     | `SELECT * FROM flight_recorder.anomaly_report('2024-01-01 10:00', '2024-01-01 11:00');` |
 
 ## ⚙️ Configuration
 
 **System under load?** Switch to emergency mode to reduce overhead:
 ```sql
-SELECT telemetry.set_mode('emergency'); -- Stops locks/progress tracking
-SELECT telemetry.set_mode('normal');    -- Back to full detail
+SELECT flight_recorder.set_mode('emergency'); -- Stops locks/progress tracking
+SELECT flight_recorder.set_mode('normal');    -- Back to full detail
 ```
 
 **Kill Switch:**
 ```sql
-SELECT telemetry.disable(); -- Stops everything immediately
+SELECT flight_recorder.disable(); -- Stops everything immediately
 ```
 
 ## 🛡️ Safety
 Built for production.
 *   **Circuit Breakers:** Auto-skips collection if the DB is stressed.
 *   **Timeouts:** Queries kill themselves if they take >2s.
-*   **Storage Limits:** Auto-disables if telemetry grows >10GB.
+*   **Storage Limits:** Auto-disables if flight recorder grows >10GB.
 
 ---
 *For deep internals, schema details, and advanced configuration, see [REFERENCE.md](REFERENCE.md).*
+
+## Why?
+
+Managed PostgreSQL platforms (Supabase, RDS, Cloud SQL) don't allow custom extensions like [pg_wait_sampling](https://github.com/postgrespro/pg_wait_sampling). This tool provides similar Active Session History (ASH) functionality using only built-in PostgreSQL features.
+
+**What it captures:**
+- Wait events and active sessions (every 30 seconds)
+- WAL, checkpoints, buffer stats (every 5 minutes)
+- Lock contention and blocking queries
+- Operation progress (vacuum, COPY, analyze, index creation)
+- Replication lag history
+- Per-table statistics for monitored tables
+
+**Trade-offs:** Dedicated extensions are more efficient. Use pg-flight-recorder when you can't install extensions or need the additional metrics it provides (locks, progress, replication, I/O).
+
+## Requirements
+
+- PostgreSQL 15, 16, or 17
+- `pg_cron` extension (1.4.1+ recommended for 30-second sampling)
+- Superuser or appropriate privileges
+- Supabase CLI (optional, for Supabase project workflow)
+
+## Quick Start
+
+### Local Development
+
+```bash
+# Start local Supabase
+supabase start
+
+# Apply migration
+supabase db reset
+
+# Run tests
+supabase test db
+```
+
+### Deploy to Hosted Project
+
+```bash
+# Link to your project
+supabase link --project-ref <your-project-ref>
+
+# Push migration
+supabase db push
+```
+
+## Usage
+
+Once deployed, the flight recorder collects automatically via `pg_cron`:
+
+```sql
+-- View recent activity (rolling 2-hour window)
+SELECT * FROM flight_recorder.recent_waits;
+SELECT * FROM flight_recorder.recent_locks;
+SELECT * FROM flight_recorder.recent_activity;
+
+-- Compare system metrics between two time points
+SELECT * FROM flight_recorder.compare('2024-12-16 14:00', '2024-12-16 15:00');
+
+-- Automatic anomaly detection
+SELECT * FROM flight_recorder.anomaly_report('2024-12-16 14:00', '2024-12-16 15:00');
+
+-- Comprehensive diagnostic report
+SELECT * FROM flight_recorder.summary_report('2024-12-16 14:00', '2024-12-16 15:00');
+```
+
+### Table Tracking
+
+Track specific tables for detailed monitoring:
+
+**⚠️ PERFORMANCE WARNING:** Each tracked table adds overhead to every snapshot (every 5 minutes):
+- 3 size calculations (relation, indexes, total) per table
+- 1 JOIN to pg_stat_user_tables per table
+- On slow storage or large tables (>10GB), can add 10-50ms per table
+
+**Recommendation:** Track only critical tables (5-20 tables max). Avoid tracking:
+- Very large tables (>100GB) unless absolutely necessary
+- Tables with heavy concurrent access
+- Temporary or frequently dropped tables
+
+```sql
+-- Register a table
+SELECT flight_recorder.track_table('orders');
+
+-- Compare table stats between time points
+SELECT * FROM flight_recorder.table_compare('orders', '2024-12-16 14:00', '2024-12-16 15:00');
+```
+
+### Query Analysis (requires pg_stat_statements)
+
+```sql
+-- Compare query performance between time windows
+SELECT * FROM flight_recorder.statement_compare('2024-12-16 14:00', '2024-12-16 15:00');
+```
+
+## How It Works
+
+Flight Recorder uses `pg_cron` to run two types of collection:
+
+1. **Snapshots** (every 5 minutes): Cumulative stats from `pg_stat_*` views (WAL, checkpoints, bgwriter, replication, temp files, I/O)
+2. **Samples** (every 30 seconds): Point-in-time snapshots of wait events, active sessions, locks, and operation progress
+
+Analysis functions compare snapshots or aggregate samples to diagnose performance issues.
+
+## Key Functions
+
+| Function | Purpose |
+|----------|---------|
+| `flight_recorder.compare(start, end)` | Compare system stats between time points |
+| `flight_recorder.wait_summary(start, end)` | Aggregate wait events over time period |
+| `flight_recorder.activity_at(timestamp)` | What was happening at specific moment? |
+| `flight_recorder.anomaly_report(start, end)` | Automatic detection of 6 issue types |
+| `flight_recorder.summary_report(start, end)` | Comprehensive diagnostic report |
+| `flight_recorder.table_compare(table, start, end)` | Compare table stats |
+| `flight_recorder.statement_compare(start, end)` | Compare query performance |
+
+## Key Views
+
+| View | Purpose |
+|------|---------|
+| `flight_recorder.recent_waits` | Wait events (last 2 hours) |
+| `flight_recorder.recent_activity` | Active sessions (last 2 hours) |
+| `flight_recorder.recent_locks` | Lock contention (last 2 hours) |
+| `flight_recorder.recent_progress` | Operation progress (last 2 hours) |
+| `flight_recorder.deltas` | Snapshot deltas (checkpoint, WAL, buffers) |
+
+## Collection Modes
+
+Reduce overhead on stressed systems:
+
+| Mode | Sample Interval | Locks | Progress | Use Case |
+|------|-----------------|-------|----------|----------|
+| `normal` | 30 seconds | Yes | Yes | Default operation |
+| `light` | 60 seconds | Yes | No | Moderate load |
+| `emergency` | 120 seconds | No | No | System under severe stress |
+
+```sql
+-- Switch modes
+SELECT flight_recorder.set_mode('emergency');
+
+-- Check current mode
+SELECT * FROM flight_recorder.get_mode();
+```
+
+### Kill Switch
+
+For real emergencies, completely stop all flight recorder collection:
+
+```sql
+-- Stop all collection immediately (unschedules all cron jobs)
+SELECT flight_recorder.disable();
+
+-- Restart collection when crisis is over
+SELECT flight_recorder.enable();
+```
+
+**What it does:**
+- `disable()` - Unschedules all 3 cron jobs, stops collection completely
+- `enable()` - Re-schedules jobs based on current mode setting
+
+## Safety Features
+
+pg-flight-recorder includes P0 production safety mechanisms to prevent the observer from becoming part of the problem:
+
+### 1. Statement & Lock Timeouts
+
+Collection functions have built-in timeouts to prevent hanging:
+- **Statement timeout**: 5 seconds (entire function must complete)
+- **Lock timeout**: 1 second (max wait for locks)
+
+If a collection query hangs due to contended system catalogs, it will be automatically terminated rather than consuming resources indefinitely.
+
+### 2. Graceful Degradation
+
+Each collection section is wrapped in exception handlers. If one part fails, the rest continues:
+- Wait events fail → Activity samples still collected
+- Lock detection fails → Progress tracking still works
+- Partial data is better than no data during incidents
+
+Failures generate PostgreSQL warnings visible in logs but don't abort the entire collection.
+
+### 3. Circuit Breaker
+
+Automatic protection against slow or stuck collectors:
+
+```sql
+-- View circuit breaker status and collection performance
+SELECT collection_type, started_at, duration_ms, success, skipped
+FROM flight_recorder.collection_stats
+ORDER BY started_at DESC
+LIMIT 20;
+```
+
+**How it works:**
+- If any collection takes >5 seconds (configurable), next run is automatically skipped
+- Prevents cascading failures when system is stressed
+- Auto-resumes after 5 minutes if system recovers
+- Skipped collections are logged with reason
+
+**Configuration:**
+```sql
+-- Adjust threshold (milliseconds)
+UPDATE flight_recorder.config SET value = '10000' WHERE key = 'circuit_breaker_threshold_ms';
+
+-- Disable circuit breaker (not recommended for production)
+UPDATE flight_recorder.config SET value = 'false' WHERE key = 'circuit_breaker_enabled';
+```
+
+### 4. Limited Result Sets
+
+Safety limits on expensive queries:
+- Lock detection: Top 100 blocking relationships (prevents O(n²) explosion)
+- Active sessions: Top 25 (prevents excessive row capture)
+- pg_stat_statements: Top 50 queries (configurable)
+
+### 5. Schema Size Monitoring (P1)
+
+Automatic monitoring and enforcement of flight recorder schema size limits:
+
+```sql
+-- Check current schema size and status
+SELECT * FROM flight_recorder._check_schema_size();
+```
+
+**How it works:**
+- Checks schema size on every sample/snapshot collection
+- **Warning threshold** (default 5GB): Logs warning, continues collection
+- **Critical threshold** (default 10GB): Automatically disables collection
+- Prevents unbounded growth that could impact database performance
+
+**Configuration:**
+```sql
+-- Adjust thresholds (megabytes)
+UPDATE flight_recorder.config SET value = '8000' WHERE key = 'schema_size_warning_mb';
+UPDATE flight_recorder.config SET value = '15000' WHERE key = 'schema_size_critical_mb';
+
+-- Disable monitoring (not recommended)
+UPDATE flight_recorder.config SET value = 'false' WHERE key = 'schema_size_check_enabled';
+```
+
+### 6. Optimized pg_stat_io Collection (P1)
+
+Reduced overhead for PostgreSQL 16+ I/O statistics:
+- Single query with `FILTER` clauses instead of 4 separate queries
+- 4× fewer catalog lookups
+- Consistent snapshot across all backend types
+- Lower probability of race conditions
+
+### 7. Post-Cleanup VACUUM (P1)
+
+Automatic space reclamation after data deletion:
+
+```sql
+-- Cleanup now returns vacuum results
+SELECT * FROM flight_recorder.cleanup('7 days');
+-- Returns: deleted_snapshots, deleted_samples, vacuumed_tables
+```
+
+**What it does:**
+- Runs `VACUUM ANALYZE` on all flight_recorder tables after cleanup
+- Reclaims disk space from deleted rows
+- Updates query planner statistics
+- Prevents table bloat over time
+- Each table vacuumed independently with exception handling
+
+### 8. Automatic Mode Switching (P2)
+
+Monitors system health and auto-adjusts collection mode based on load indicators:
+
+```sql
+-- Enable automatic mode switching
+UPDATE flight_recorder.config SET value = 'true' WHERE key = 'auto_mode_enabled';
+
+-- Configure thresholds
+UPDATE flight_recorder.config SET value = '80' WHERE key = 'auto_mode_connections_threshold';
+UPDATE flight_recorder.config SET value = '3' WHERE key = 'auto_mode_trips_threshold';
+```
+
+**How it works:**
+- Checks system indicators every sample collection (30s-2min depending on mode)
+- **Normal → Light**: When active connections ≥80% of max_connections
+- **Light/Normal → Emergency**: When circuit breaker trips ≥3 times in 10 minutes
+- **Emergency → Light**: When no circuit breaker trips for 10 minutes
+- **Light → Normal**: When connections drop below 70% of threshold
+- Mode changes logged via PostgreSQL NOTICE
+
+**Why use it:**
+- Reduces flight recorder overhead automatically during high load
+- Prevents flight recorder from contributing to cascading failures
+- Auto-recovers to normal monitoring when system stabilizes
+
+### 9. Configurable Retention by Table Type (P2)
+
+Different retention periods for different data types:
+
+```sql
+-- Configure retention (days)
+UPDATE flight_recorder.config SET value = '7' WHERE key = 'retention_samples_days';      -- High frequency
+UPDATE flight_recorder.config SET value = '30' WHERE key = 'retention_snapshots_days';   -- Cumulative stats
+UPDATE flight_recorder.config SET value = '30' WHERE key = 'retention_statements_days';  -- Query stats
+
+-- Cleanup uses configured retention (new default behavior)
+SELECT * FROM flight_recorder.cleanup();
+-- Returns: deleted_snapshots, deleted_samples, deleted_statements, vacuumed_tables
+
+-- Legacy: Specify retention explicitly (overrides config)
+SELECT * FROM flight_recorder.cleanup('7 days');
+```
+
+**Benefits:**
+- Keep cumulative stats longer than high-frequency samples
+- Balance disk usage with diagnostic capabilities
+- Samples (every 30s) default to 7 days, snapshots (every 5min) default to 30 days
+
+### 10. Partition Management Helpers (P2)
+
+Optional functions for time-based partitioning (advanced use case):
+
+```sql
+-- Check current partition status
+SELECT * FROM flight_recorder.partition_status();
+
+-- Create next partition (if using partitioned tables)
+SELECT flight_recorder.create_next_partition('samples', 'day');
+SELECT flight_recorder.create_next_partition('snapshots', 'week');
+
+-- Drop old partitions (faster than DELETE)
+SELECT * FROM flight_recorder.drop_old_partitions('samples', '7 days');
+```
+
+**When to use:**
+- Very high volume installations (thousands of samples/day)
+- Need faster cleanup operations (DROP PARTITION vs DELETE)
+- Want partition-level backup/restore capabilities
+
+**Note:** Converting existing tables to partitioned requires data migration. These functions are for new installs or users who have already migrated to partitioned tables.
+
+### 11. Health Checks and Self-Monitoring (P3)
+
+Operational visibility into the flight recorder system itself:
+
+```sql
+-- Quick health status of all flight recorder components
+SELECT * FROM flight_recorder.health_check();
+-- Returns: component, status, details, action_required
+
+-- Analyze flight recorder performance impact over time
+SELECT * FROM flight_recorder.performance_report('24 hours');
+-- Returns: metric, value, assessment
+```
+
+**Components monitored:**
+- **Flight Recorder System**: Enabled/disabled status, current mode
+- **Schema Size**: Current size vs thresholds with percentage
+- **Circuit Breaker**: Recent trips in last hour
+- **Collection Freshness**: When last sample/snapshot was collected
+- **Data Volume**: Current counts of samples and snapshots
+
+**Performance metrics:**
+- Avg/Max sample duration (with assessment: Excellent/Good/Acceptable/Poor)
+- Avg snapshot duration
+- Schema size with cleanup recommendations
+- Collection success rate
+- Skipped collection count
+
+**Use cases:**
+- Operational dashboards: Monitor flight recorder health
+- Troubleshooting: Identify when flight recorder stops collecting
+- Capacity planning: Track growth rates and performance trends
+
+### 12. Alert System (P4)
+
+Proactive notifications for critical conditions:
+
+```sql
+-- Enable alerts
+UPDATE flight_recorder.config SET value = 'true' WHERE key = 'alert_enabled';
+
+-- Configure thresholds
+UPDATE flight_recorder.config SET value = '5' WHERE key = 'alert_circuit_breaker_count';  -- 5 trips/hour
+UPDATE flight_recorder.config SET value = '8000' WHERE key = 'alert_schema_size_mb';      -- 8GB warning
+
+-- Check for active alerts
+SELECT * FROM flight_recorder.check_alerts('1 hour');
+-- Returns: alert_type, severity, message, triggered_at, recommendation
+```
+
+**Alert types:**
+- **CIRCUIT_BREAKER_TRIPS** (CRITICAL): Excessive trips indicate system stress
+- **SCHEMA_SIZE_HIGH** (WARNING): Schema approaching critical threshold
+- **COLLECTION_FAILURES** (WARNING): Multiple collection failures detected
+- **STALE_DATA** (CRITICAL): No recent collections (possible pg_cron failure)
+
+**Integration:**
+- Poll `check_alerts()` from external monitoring (Datadog, PagerDuty, etc.)
+- Schedule via pg_cron to log alerts to application_name
+- Disabled by default to avoid alert fatigue
+
+### 13. AI Data Export (P4)
+
+Export flight recorder data in a compact, token-efficient format optimized for LLM analysis (ChatGPT, Claude, etc.):
+
+```sql
+-- Export to AI-friendly JSON
+SELECT flight_recorder.export_json(
+    '2024-12-16 14:00'::timestamptz,
+    '2024-12-16 15:00'::timestamptz
+);
+```
+
+**Why it's better:**
+- **Token Efficient:** Uses compact arrays instead of verbose objects (reduces tokens by ~60%)
+- **Context Aware:** Includes pre-calculated anomaly reports and wait summaries
+- **Schema Hints:** Includes metadata describing the data structure for the AI
+
+**JSON structure:**
+```json
+{
+  "meta": {
+    "generated_at": "...",
+    "schemas": { "samples": "..." }
+  },
+  "anomalies": [ ... ],
+  "wait_summary": [ ... ],
+  "samples": [
+    ["2024-12-16T14:00:00Z", [[...wait_events]], [[...locks]]],
+    ...
+  ]
+}
+```
+
+### 14. Configuration Recommendations (P4)
+
+AI-assisted configuration optimization:
+
+```sql
+-- Get personalized recommendations based on actual usage
+SELECT * FROM flight_recorder.config_recommendations();
+-- Returns: category, recommendation, reason, sql_command
+```
+
+**Recommendation categories:**
+- **Performance**: Mode optimization based on sample duration
+- **Storage**: Cleanup and retention tuning based on volume
+- **Automation**: Auto-mode suggestions when overhead varies
+- **Scalability**: Partitioning recommendations for high volume
+
+**Example output:**
+```
+category     | recommendation                  | reason                           | sql_command
+-------------|---------------------------------|----------------------------------|---------------------------
+Performance  | Switch to light mode            | Average sample duration is 1200ms| SELECT flight_recorder.set_mode('light');
+Storage      | Run cleanup to reclaim space    | Schema size is 6500 MB           | SELECT * FROM flight_recorder.cleanup();
+Automation   | Enable automatic mode switching | Sample duration varies           | UPDATE flight_recorder.config SET...
+```
+
+**When to use:**
+- After initial deployment (baseline configuration)
+- During capacity planning exercises
+- When investigating performance issues
+- Quarterly optimization reviews
+
+## Anomaly Detection
+
+Automatically detects 6 common issues:
+
+| Anomaly Type | Description |
+|--------------|-------------|
+| `CHECKPOINT_DURING_WINDOW` | Checkpoint occurred (potential I/O spike) |
+| `FORCED_CHECKPOINT` | WAL exceeded max_wal_size |
+| `BUFFER_PRESSURE` | Backends writing directly (shared_buffers exhausted) |
+| `BACKEND_FSYNC` | Backends doing fsync (bgwriter can't keep up) |
+| `TEMP_FILE_SPILLS` | Queries spilling to disk (work_mem too low) |
+| `LOCK_CONTENTION` | Sessions blocked waiting for locks |
+
+```sql
+SELECT anomaly_type, severity, description, recommendation
+FROM flight_recorder.anomaly_report('2024-12-16 14:00', '2024-12-16 15:00');
+```
+
+## Project Structure
+
+```
+pg-flight-recorder/
+├── supabase/
+│   ├── config.toml              # Supabase configuration
+│   ├── migrations/
+│   │   ├── 20260105000000_enable_pg_cron.sql
+│   │   └── 20260106000000_pg_flight_recorder.sql
+│   └── tests/
+│       └── 00001_flight_recorder_test.sql
+├── install.sql                  # Standalone install (non-Supabase)
+├── uninstall.sql                # Standalone uninstall
+└── README.md
+```
+
+## Testing
+
+The test suite uses [pgTAP](https://pgtap.org/) via `supabase test db`.
+
+### Run Tests Locally
+
+```bash
+# Ensure local Supabase is running
+supabase start
+
+# Run all tests (127 tests)
+supabase test db
+```
+
+**Note:** Tests run inside a transaction, so VACUUM warnings are expected during `cleanup()` tests. In production, cleanup runs via pg_cron outside transactions and VACUUM works normally.
+
+### Test Coverage
+
+| Category | Tests | Description |
+|----------|-------|-------------|
+| Installation Verification | 16 | Schema, 12 tables, 7 views |
+| Function Existence | 24 | All functions including P0/P1/P2/P3/P4 helpers |
+| Core Functionality | 10 | snapshot(), sample(), config |
+| Table Tracking | 5 | track/untrack/list operations |
+| Analysis Functions | 8 | compare(), wait_summary(), anomaly_report(), etc. |
+| Configuration | 5 | get_mode(), set_mode() |
+| Views | 5 | All views queryable |
+| Kill Switch | 6 | disable(), enable() |
+| P0 Safety Features | 10 | Circuit breaker, exception handling, stats tracking |
+| P1 Safety Features | 8 | Schema size monitoring, optimized queries, post-cleanup VACUUM |
+| P2 Safety Features | 12 | Auto mode switching, configurable retention, partition helpers |
+| P3 Operational Features | 9 | Health checks, performance reports, self-monitoring |
+| P4 Advanced Features | 10 | Alerts, JSON export, configuration recommendations |
+
+## Standalone Installation (Non-Supabase)
+
+For PostgreSQL without Supabase:
+
+```bash
+# Install
+psql -f install.sql
+
+# Uninstall
+psql -f uninstall.sql
+```
+
+Requires PostgreSQL 15+ with pg_cron and superuser privileges.
+
+## Important Notes
+
+- Flight Recorder runs automatically after installation via `pg_cron`
+- Default retention is 7 days (configurable via `flight_recorder.cleanup()`)
+- If pg_cron < 1.4.1, sampling falls back to every minute instead of 30 seconds
+- pg_stat_statements is optional but recommended for query analysis
+- For stressed systems, use `flight_recorder.set_mode('emergency')` to reduce overhead

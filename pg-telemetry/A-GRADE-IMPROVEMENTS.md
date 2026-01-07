@@ -1,4 +1,4 @@
-# A-Grade Safety Improvements to pg-telemetry
+# A-Grade Safety Improvements to pg-flight-recorder
 
 **Date:** 2026-01-06
 **Objective:** Minimize observer effect and achieve A-grade safety for production deployment on stressed PostgreSQL systems
@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-pg-telemetry has been upgraded from **B- to A grade** for observer safety through comprehensive improvements across architecture, configuration, and query optimization. These changes reduce the risk of the monitoring system contributing to the problems it's designed to detect.
+pg-flight-recorder has been upgraded from **B- to A grade** for observer safety through comprehensive improvements across architecture, configuration, and query optimization. These changes reduce the risk of the monitoring system contributing to the problems it's designed to detect.
 
 ### Key Metrics Comparison
 
@@ -209,7 +209,7 @@ END IF
 ### Impact
 - System **automatically adapts** to load without human intervention
 - Reduces overhead **before** system reaches crisis state
-- Prevents need for manual `telemetry.set_mode()` calls during incidents
+- Prevents need for manual `flight_recorder.set_mode()` calls during incidents
 
 ### Files Modified
 - `install.sql:657-659` - Config defaults (enabled + 60% threshold)
@@ -220,7 +220,7 @@ END IF
 ## 6. PARTITIONED TABLES FOR EFFICIENT CLEANUP (New)
 
 ### Change
-Converted `telemetry.samples` from regular table to **partitioned table** with daily partitions.
+Converted `flight_recorder.samples` from regular table to **partitioned table** with daily partitions.
 
 ### Architecture
 
@@ -251,17 +251,17 @@ Converted `telemetry.samples` from regular table to **partitioned table** with d
 
 ### New Functions
 
-#### `telemetry.create_partitions(p_days_ahead INTEGER DEFAULT 3)`
+#### `flight_recorder.create_partitions(p_days_ahead INTEGER DEFAULT 3)`
 Creates future partitions proactively to prevent INSERT failures.
 
 **Scheduled:** Daily at 2 AM via pg_cron
 
-#### `telemetry.drop_old_partitions(p_retention_days INTEGER DEFAULT NULL)`
+#### `flight_recorder.drop_old_partitions(p_retention_days INTEGER DEFAULT NULL)`
 Drops partitions older than retention period (default: 7 days from config).
 
 **Scheduled:** Daily at 3 AM via pg_cron (before cleanup())
 
-#### `telemetry.list_partitions()`
+#### `flight_recorder.list_partitions()`
 Returns table of all partitions with sizes and row counts for monitoring.
 
 ### Migration Notes
@@ -284,7 +284,7 @@ Returns table of all partitions with sizes and row counts for monitoring.
 |-----|---------|---------|
 | `statement_timeout_ms` | 2000 | Max total collection time |
 | `lock_timeout_ms` | 500 | Max wait for catalog locks |
-| `work_mem_kb` | 2048 | Memory limit for telemetry queries |
+| `work_mem_kb` | 2048 | Memory limit for flight recorder queries |
 | `skip_locks_threshold` | 200 | Skip lock collection if > N blocked locks |
 | `skip_activity_conn_threshold` | 400 | Skip activity if > N active connections |
 
@@ -299,7 +299,7 @@ Returns table of all partitions with sizes and row counts for monitoring.
 ### Runtime Configurability
 All thresholds tunable without code changes:
 ```sql
-UPDATE telemetry.config SET value = '500'
+UPDATE flight_recorder.config SET value = '500'
 WHERE key = 'circuit_breaker_threshold_ms';
 ```
 
@@ -343,7 +343,7 @@ All SQL changes validated for:
 ### For New Installations
 Simply run:
 ```bash
-psql -f pg-telemetry/install.sql
+psql -f pg-flight-recorder/install.sql
 # or
 supabase db push
 ```
@@ -355,10 +355,10 @@ All A-grade defaults applied automatically.
 **Option 1: Fresh Install (Recommended)**
 ```sql
 -- Uninstall old version
-\i pg-telemetry/uninstall.sql
+\i pg-flight-recorder/uninstall.sql
 
 -- Install new version
-\i pg-telemetry/install.sql
+\i pg-flight-recorder/install.sql
 ```
 
 **Option 2: In-Place Upgrade (Advanced)**
@@ -368,11 +368,11 @@ All A-grade defaults applied automatically.
 -- Contact support for assistance
 
 -- 2. Update configuration
-UPDATE telemetry.config SET value = '1000' WHERE key = 'circuit_breaker_threshold_ms';
-UPDATE telemetry.config SET value = 'true' WHERE key = 'auto_mode_enabled';
-UPDATE telemetry.config SET value = '60' WHERE key = 'auto_mode_connections_threshold';
+UPDATE flight_recorder.config SET value = '1000' WHERE key = 'circuit_breaker_threshold_ms';
+UPDATE flight_recorder.config SET value = 'true' WHERE key = 'auto_mode_enabled';
+UPDATE flight_recorder.config SET value = '60' WHERE key = 'auto_mode_connections_threshold';
 
-INSERT INTO telemetry.config (key, value) VALUES
+INSERT INTO flight_recorder.config (key, value) VALUES
     ('statement_timeout_ms', '2000'),
     ('lock_timeout_ms', '500'),
     ('work_mem_kb', '2048'),
@@ -443,7 +443,7 @@ ON CONFLICT (key) DO NOTHING;
 
 ## 13. COMPARISON TO INDUSTRY STANDARDS
 
-| Feature | Oracle ASH | pg_wait_sampling | pg-telemetry (A-Grade) |
+| Feature | Oracle ASH | pg_wait_sampling | pg-flight-recorder (A-Grade) |
 |---------|------------|------------------|------------------------|
 | **Sampling Frequency** | 1s | Configurable | 60s (normal), adaptive |
 | **Storage** | Circular buffer (memory) | Shared memory | Partitioned tables |
@@ -453,7 +453,7 @@ ON CONFLICT (key) DO NOTHING;
 | **Installation** | Built-in | Extension required | Pure SQL (no extension) |
 | **Managed Platform** | N/A | Not available | **Supabase, RDS, Cloud SQL** |
 
-**pg-telemetry Unique Value:**
+**pg-flight-recorder Unique Value:**
 - Only solution for managed platforms (no extension install)
 - Historical analysis (not just real-time)
 - Production-safe defaults out of the box
@@ -473,7 +473,7 @@ ON CONFLICT (key) DO NOTHING;
 7. **Integration with pg_stat_statements** for automatic statement tracking
 
 ### Not Planned
-- **Real-time streaming:** pg-telemetry is for historical analysis, not real-time monitoring
+- **Real-time streaming:** pg-flight-recorder is for historical analysis, not real-time monitoring
 - **Custom wait events:** Would require extension
 - **Kernel-level sampling:** Would require custom extension or OS access
 
@@ -481,7 +481,7 @@ ON CONFLICT (key) DO NOTHING;
 
 ## 15. CONCLUSION
 
-pg-telemetry has been successfully upgraded to **A-grade safety** through:
+pg-flight-recorder has been successfully upgraded to **A-grade safety** through:
 
 1. **2× reduction** in sampling frequency (30s → 60s)
 2. **2.5-5× faster** timeouts and circuit breaker

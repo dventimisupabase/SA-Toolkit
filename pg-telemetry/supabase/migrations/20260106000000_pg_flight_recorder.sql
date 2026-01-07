@@ -1,8 +1,8 @@
 -- =============================================================================
--- pg-telemetry: PostgreSQL Performance Telemetry
+-- pg-flight-recorder: PostgreSQL Performance Flight Recorder
 -- =============================================================================
 --
--- Server-side telemetry for PostgreSQL performance diagnostics.
+-- Server-side flight recorder for PostgreSQL performance diagnostics.
 -- Continuously collects metrics to answer: "What was happening during this time window?"
 --
 -- REQUIREMENTS
@@ -38,93 +38,93 @@
 -- QUICK START
 -- -----------
 --   -- 1. Optionally track specific tables for detailed monitoring
---   SELECT telemetry.track_table('orders');
+--   SELECT flight_recorder.track_table('orders');
 --
---   -- 2. Telemetry collects automatically in the background
+--   -- 2. Flight Recorder collects automatically in the background
 --
 --   -- 3. Query any time window to diagnose performance
---   SELECT * FROM telemetry.compare('2024-12-16 14:00', '2024-12-16 15:00');
---   SELECT * FROM telemetry.table_compare('orders', '2024-12-16 14:00', '2024-12-16 15:00');
---   SELECT * FROM telemetry.wait_summary('2024-12-16 14:00', '2024-12-16 15:00');
+--   SELECT * FROM flight_recorder.compare('2024-12-16 14:00', '2024-12-16 15:00');
+--   SELECT * FROM flight_recorder.table_compare('orders', '2024-12-16 14:00', '2024-12-16 15:00');
+--   SELECT * FROM flight_recorder.wait_summary('2024-12-16 14:00', '2024-12-16 15:00');
 --
 --   -- 4. Or use the recent_* views for rolling 2-hour visibility
---   SELECT * FROM telemetry.recent_waits;
---   SELECT * FROM telemetry.recent_locks;
---   SELECT * FROM telemetry.recent_activity;
+--   SELECT * FROM flight_recorder.recent_waits;
+--   SELECT * FROM flight_recorder.recent_locks;
+--   SELECT * FROM flight_recorder.recent_activity;
 --
 -- FUNCTIONS
 -- ---------
---   telemetry.snapshot()
+--   flight_recorder.snapshot()
 --       Capture cumulative stats. Called automatically every 5 min.
 --       Returns: timestamp of capture
 --
---   telemetry.sample()
+--   flight_recorder.sample()
 --       Capture point-in-time activity. Called automatically every 30 sec.
 --       Returns: timestamp of capture
 --
---   telemetry.track_table(name, schema DEFAULT 'public')
+--   flight_recorder.track_table(name, schema DEFAULT 'public')
 --       Register a table for per-table monitoring.
 --       Returns: confirmation message
 --
---   telemetry.untrack_table(name, schema DEFAULT 'public')
+--   flight_recorder.untrack_table(name, schema DEFAULT 'public')
 --       Stop monitoring a table.
 --       Returns: confirmation message
 --
---   telemetry.list_tracked_tables()
+--   flight_recorder.list_tracked_tables()
 --       Show all tracked tables.
 --       Returns: table of (schemaname, relname, added_at)
 --
---   telemetry.compare(start_time, end_time)
+--   flight_recorder.compare(start_time, end_time)
 --       Compare cumulative stats between two time points.
 --       Returns: single row with deltas for WAL, checkpoints, bgwriter, I/O
 --
---   telemetry.table_compare(table, start_time, end_time, schema DEFAULT 'public')
+--   flight_recorder.table_compare(table, start_time, end_time, schema DEFAULT 'public')
 --       Compare table stats between two time points.
 --       Returns: single row with size delta, tuple counts, vacuum activity
 --
---   telemetry.wait_summary(start_time, end_time)
+--   flight_recorder.wait_summary(start_time, end_time)
 --       Aggregate wait events over a time period.
 --       Returns: rows ordered by total_waiters DESC
 --       Columns: backend_type, wait_event_type, wait_event, sample_count,
 --                total_waiters, avg_waiters, max_waiters, pct_of_samples
 --
---   telemetry.cleanup(retain_interval DEFAULT '7 days')
---       Remove old telemetry data.
+--   flight_recorder.cleanup(retain_interval DEFAULT '7 days')
+--       Remove old flight recorder data.
 --       Returns: (deleted_snapshots, deleted_samples)
 --
 -- VIEWS
 -- -----
---   telemetry.deltas
+--   flight_recorder.deltas
 --       Changes between consecutive snapshots.
 --       Key columns: checkpoint_occurred, wal_bytes_delta, wal_bytes_pretty,
 --                    ckpt_write_time_ms, bgw_buffers_backend_delta,
 --                    temp_files_delta, temp_bytes_pretty
 --
---   telemetry.table_deltas
+--   flight_recorder.table_deltas
 --       Changes to tracked tables between consecutive snapshots.
 --       Key columns: size_delta_pretty, inserts_delta, n_dead_tup,
 --                    dead_tuple_ratio, autovacuum_ran, autoanalyze_ran
 --
---   telemetry.recent_waits
+--   flight_recorder.recent_waits
 --       Wait events from last 2 hours.
 --       Columns: captured_at, backend_type, wait_event_type, wait_event, state, count
 --
---   telemetry.recent_activity
+--   flight_recorder.recent_activity
 --       Active sessions from last 2 hours.
 --       Columns: captured_at, pid, usename, backend_type, state, wait_event,
 --                running_for, query_preview
 --
---   telemetry.recent_locks
+--   flight_recorder.recent_locks
 --       Lock contention from last 2 hours.
 --       Columns: captured_at, blocked_pid, blocked_duration, blocking_pid,
 --                lock_type, locked_relation, blocked_query_preview
 --
---   telemetry.recent_progress
+--   flight_recorder.recent_progress
 --       Operation progress (vacuum/copy/analyze/create_index) from last 2 hours.
 --       Columns: captured_at, progress_type, pid, relname, phase,
 --                blocks_pct, tuples_done, bytes_done_pretty
 --
---   telemetry.recent_replication
+--   flight_recorder.recent_replication
 --       Replication lag from last 2 hours.
 --       Columns: captured_at, application_name, state, sync_state,
 --                replay_lag_bytes, replay_lag_pretty, write_lag, flush_lag, replay_lag
@@ -179,7 +179,7 @@
 --   PATTERN 1: Lock Contention
 --   Symptoms:
 --     - Batch takes 10x longer than expected
---     - telemetry.recent_locks shows blocked_pid entries
+--     - flight_recorder.recent_locks shows blocked_pid entries
 --     - wait_summary() shows Lock:relation or Lock:extend events
 --   Example findings:
 --     - blocked_pid=12345, blocking_pid=12346, blocked_duration='00:00:09'
@@ -255,30 +255,30 @@
 --   For a slow batch between START_TIME and END_TIME:
 --
 --   1. Overall health:
---      SELECT * FROM telemetry.compare('START_TIME', 'END_TIME');
+--      SELECT * FROM flight_recorder.compare('START_TIME', 'END_TIME');
 --      => Check: checkpoint_occurred, bgw_buffers_backend_delta, wal_bytes,
 --                temp_files_delta, temp_bytes_pretty
 --
 --   2. Lock contention:
---      SELECT * FROM telemetry.recent_locks
+--      SELECT * FROM flight_recorder.recent_locks
 --      WHERE captured_at BETWEEN 'START_TIME' AND 'END_TIME';
 --      => Look for: blocked_pid entries, blocked_duration > 1s
 --
 --   3. Wait events:
---      SELECT * FROM telemetry.wait_summary('START_TIME', 'END_TIME');
+--      SELECT * FROM flight_recorder.wait_summary('START_TIME', 'END_TIME');
 --      => Red flags: Lock:*, LWLock:WALWrite, LWLock:BufferContent
 --
 --   4. Table-specific (if tracking):
---      SELECT * FROM telemetry.table_compare('mytable', 'START_TIME', 'END_TIME');
+--      SELECT * FROM flight_recorder.table_compare('mytable', 'START_TIME', 'END_TIME');
 --      => Check: autovacuum_ran, dead_tuple_ratio, size_delta
 --
 --   5. Active operations:
---      SELECT * FROM telemetry.recent_progress
+--      SELECT * FROM flight_recorder.recent_progress
 --      WHERE captured_at BETWEEN 'START_TIME' AND 'END_TIME';
 --      => Check: overlapping vacuum, COPY, or index builds
 --
 --   6. Replication lag (if using sync replication):
---      SELECT * FROM telemetry.recent_replication
+--      SELECT * FROM flight_recorder.recent_replication
 --      WHERE captured_at BETWEEN 'START_TIME' AND 'END_TIME';
 --      => Check: replay_lag_bytes, write_lag/flush_lag intervals
 --
@@ -290,30 +290,30 @@
 --
 -- SCHEDULED JOBS (pg_cron)
 -- ------------------------
---   telemetry_snapshot  : */5 * * * *   (every 5 minutes)
---   telemetry_sample    : 60 seconds    (REDUCED from 30s for observer safety - adaptive mode adjusts dynamically)
---   telemetry_cleanup   : 0 3 * * *     (daily at 3 AM - drops old partitions and cleans snapshots)
---   telemetry_partition : 0 2 * * *     (daily at 2 AM - creates future partitions proactively)
+--   flight_recorder_snapshot  : */5 * * * *   (every 5 minutes)
+--   flight_recorder_sample    : 60 seconds    (REDUCED from 30s for observer safety - adaptive mode adjusts dynamically)
+--   flight_recorder_cleanup   : 0 3 * * *     (daily at 3 AM - drops old partitions and cleans snapshots)
+--   flight_recorder_partition : 0 2 * * *     (daily at 2 AM - creates future partitions proactively)
 --
 --   NOTE: The installer auto-detects pg_cron version. If < 1.4.1 (e.g., "1.4-1"),
 --   it falls back to minute-level sampling and logs a notice.
 --
 -- UNINSTALL
 -- ---------
---   SELECT cron.unschedule('telemetry_snapshot');
---   SELECT cron.unschedule('telemetry_sample');
---   SELECT cron.unschedule('telemetry_cleanup');
---   DROP SCHEMA telemetry CASCADE;
+--   SELECT cron.unschedule('flight_recorder_snapshot');
+--   SELECT cron.unschedule('flight_recorder_sample');
+--   SELECT cron.unschedule('flight_recorder_cleanup');
+--   DROP SCHEMA flight_recorder CASCADE;
 --
 -- =============================================================================
 
-CREATE SCHEMA IF NOT EXISTS telemetry;
+CREATE SCHEMA IF NOT EXISTS flight_recorder;
 
 -- -----------------------------------------------------------------------------
 -- Table: snapshots
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS telemetry.snapshots (
+CREATE TABLE IF NOT EXISTS flight_recorder.snapshots (
     id              SERIAL PRIMARY KEY,
     captured_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     pg_version      INTEGER NOT NULL,
@@ -367,13 +367,13 @@ CREATE TABLE IF NOT EXISTS telemetry.snapshots (
     temp_bytes                  BIGINT            -- cumulative temp bytes written
 );
 
-CREATE INDEX IF NOT EXISTS snapshots_captured_at_idx ON telemetry.snapshots(captured_at);
+CREATE INDEX IF NOT EXISTS snapshots_captured_at_idx ON flight_recorder.snapshots(captured_at);
 
 -- -----------------------------------------------------------------------------
 -- Table: tracked_tables - Tables to monitor for batch operations
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS telemetry.tracked_tables (
+CREATE TABLE IF NOT EXISTS flight_recorder.tracked_tables (
     relid           OID PRIMARY KEY,
     schemaname      TEXT NOT NULL DEFAULT 'public',
     relname         TEXT NOT NULL,
@@ -384,8 +384,8 @@ CREATE TABLE IF NOT EXISTS telemetry.tracked_tables (
 -- Table: table_snapshots - Per-table stats captured with each snapshot
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS telemetry.table_snapshots (
-    snapshot_id             INTEGER REFERENCES telemetry.snapshots(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS flight_recorder.table_snapshots (
+    snapshot_id             INTEGER REFERENCES flight_recorder.snapshots(id) ON DELETE CASCADE,
     relid                   OID,
     schemaname              TEXT,
     relname                 TEXT,
@@ -418,8 +418,8 @@ CREATE TABLE IF NOT EXISTS telemetry.table_snapshots (
 -- Table: replication_snapshots - Per-replica stats captured with each snapshot
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS telemetry.replication_snapshots (
-    snapshot_id             INTEGER REFERENCES telemetry.snapshots(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS flight_recorder.replication_snapshots (
+    snapshot_id             INTEGER REFERENCES flight_recorder.snapshots(id) ON DELETE CASCADE,
     pid                     INTEGER NOT NULL,
     client_addr             INET,
     application_name        TEXT,
@@ -441,8 +441,8 @@ CREATE TABLE IF NOT EXISTS telemetry.replication_snapshots (
 -- Table: statement_snapshots - pg_stat_statements metrics per snapshot
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS telemetry.statement_snapshots (
-    snapshot_id         INTEGER REFERENCES telemetry.snapshots(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS flight_recorder.statement_snapshots (
+    snapshot_id         INTEGER REFERENCES flight_recorder.snapshots(id) ON DELETE CASCADE,
     queryid             BIGINT NOT NULL,
     userid              OID,
     dbid                OID,
@@ -478,14 +478,14 @@ CREATE TABLE IF NOT EXISTS telemetry.statement_snapshots (
 );
 
 CREATE INDEX IF NOT EXISTS statement_snapshots_queryid_idx
-    ON telemetry.statement_snapshots(queryid);
+    ON flight_recorder.statement_snapshots(queryid);
 
 -- -----------------------------------------------------------------------------
 -- Table: samples - High-frequency sampling (every 60 seconds, adaptive)
 -- PARTITIONED BY RANGE (captured_at) - Daily partitions for efficient cleanup
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS telemetry.samples (
+CREATE TABLE IF NOT EXISTS flight_recorder.samples (
     id              BIGINT GENERATED ALWAYS AS IDENTITY,
     captured_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (id, captured_at)
@@ -507,10 +507,10 @@ BEGIN
 
         IF NOT EXISTS (
             SELECT 1 FROM pg_tables
-            WHERE schemaname = 'telemetry' AND tablename = v_partition_name
+            WHERE schemaname = 'flight_recorder' AND tablename = v_partition_name
         ) THEN
             EXECUTE format(
-                'CREATE TABLE IF NOT EXISTS telemetry.%I PARTITION OF telemetry.samples FOR VALUES FROM (%L) TO (%L)',
+                'CREATE TABLE IF NOT EXISTS flight_recorder.%I PARTITION OF flight_recorder.samples FOR VALUES FROM (%L) TO (%L)',
                 v_partition_name, v_start_date, v_end_date
             );
         END IF;
@@ -518,13 +518,13 @@ BEGIN
 END $$;
 
 -- Index on parent table (inherited by all partitions)
-CREATE INDEX IF NOT EXISTS samples_captured_at_idx ON telemetry.samples(captured_at);
+CREATE INDEX IF NOT EXISTS samples_captured_at_idx ON flight_recorder.samples(captured_at);
 
 -- -----------------------------------------------------------------------------
 -- Table: wait_samples - Aggregated wait events per sample
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS telemetry.wait_samples (
+CREATE TABLE IF NOT EXISTS flight_recorder.wait_samples (
     sample_id           INTEGER,
     sample_captured_at  TIMESTAMPTZ,
     backend_type        TEXT NOT NULL,
@@ -533,14 +533,14 @@ CREATE TABLE IF NOT EXISTS telemetry.wait_samples (
     state               TEXT NOT NULL,
     count               INTEGER NOT NULL,
     PRIMARY KEY (sample_id, backend_type, wait_event_type, wait_event, state),
-    FOREIGN KEY (sample_id, sample_captured_at) REFERENCES telemetry.samples(id, captured_at) ON DELETE CASCADE
+    FOREIGN KEY (sample_id, sample_captured_at) REFERENCES flight_recorder.samples(id, captured_at) ON DELETE CASCADE
 );
 
 -- -----------------------------------------------------------------------------
 -- Table: activity_samples - Top active sessions per sample
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS telemetry.activity_samples (
+CREATE TABLE IF NOT EXISTS flight_recorder.activity_samples (
     sample_id           INTEGER,
     sample_captured_at  TIMESTAMPTZ,
     pid                 INTEGER NOT NULL,
@@ -554,14 +554,14 @@ CREATE TABLE IF NOT EXISTS telemetry.activity_samples (
     state_change        TIMESTAMPTZ,
     query_preview       TEXT,
     PRIMARY KEY (sample_id, pid),
-    FOREIGN KEY (sample_id, sample_captured_at) REFERENCES telemetry.samples(id, captured_at) ON DELETE CASCADE
+    FOREIGN KEY (sample_id, sample_captured_at) REFERENCES flight_recorder.samples(id, captured_at) ON DELETE CASCADE
 );
 
 -- -----------------------------------------------------------------------------
 -- Table: progress_samples - Operation progress (vacuum, copy, analyze, etc.)
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS telemetry.progress_samples (
+CREATE TABLE IF NOT EXISTS flight_recorder.progress_samples (
     sample_id           INTEGER,
     sample_captured_at  TIMESTAMPTZ,
     progress_type       TEXT NOT NULL,      -- 'vacuum', 'copy', 'analyze', 'create_index'
@@ -577,14 +577,14 @@ CREATE TABLE IF NOT EXISTS telemetry.progress_samples (
     bytes_done          BIGINT,
     details             JSONB,              -- Type-specific additional fields
     PRIMARY KEY (sample_id, progress_type, pid),
-    FOREIGN KEY (sample_id, sample_captured_at) REFERENCES telemetry.samples(id, captured_at) ON DELETE CASCADE
+    FOREIGN KEY (sample_id, sample_captured_at) REFERENCES flight_recorder.samples(id, captured_at) ON DELETE CASCADE
 );
 
 -- -----------------------------------------------------------------------------
 -- Table: lock_samples - Blocking lock relationships
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS telemetry.lock_samples (
+CREATE TABLE IF NOT EXISTS flight_recorder.lock_samples (
     sample_id               INTEGER,
     sample_captured_at  TIMESTAMPTZ,
     blocked_pid             INTEGER NOT NULL,
@@ -599,14 +599,14 @@ CREATE TABLE IF NOT EXISTS telemetry.lock_samples (
     lock_type               TEXT,
     locked_relation         TEXT,
     PRIMARY KEY (sample_id, blocked_pid, blocking_pid),
-    FOREIGN KEY (sample_id, sample_captured_at) REFERENCES telemetry.samples(id, captured_at) ON DELETE CASCADE
+    FOREIGN KEY (sample_id, sample_captured_at) REFERENCES flight_recorder.samples(id, captured_at) ON DELETE CASCADE
 );
 
 -- -----------------------------------------------------------------------------
 -- Helper: Pretty-print bytes
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry._pretty_bytes(bytes BIGINT)
+CREATE OR REPLACE FUNCTION flight_recorder._pretty_bytes(bytes BIGINT)
 RETURNS TEXT
 LANGUAGE sql IMMUTABLE AS $$
     SELECT CASE
@@ -622,24 +622,24 @@ $$;
 -- Helper: Get PG major version
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry._pg_version()
+CREATE OR REPLACE FUNCTION flight_recorder._pg_version()
 RETURNS INTEGER
 LANGUAGE sql STABLE AS $$
     SELECT current_setting('server_version_num')::integer / 10000
 $$;
 
 -- -----------------------------------------------------------------------------
--- Table: config - Telemetry configuration settings
+-- Table: config - Flight Recorder configuration settings
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS telemetry.config (
+CREATE TABLE IF NOT EXISTS flight_recorder.config (
     key         TEXT PRIMARY KEY,
     value       TEXT NOT NULL,
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
 -- Default configuration (A-GRADE SAFETY DEFAULTS)
-INSERT INTO telemetry.config (key, value) VALUES
+INSERT INTO flight_recorder.config (key, value) VALUES
     ('mode', 'normal'),
     ('statements_enabled', 'auto'),
     ('statements_top_n', '50'),
@@ -653,7 +653,7 @@ INSERT INTO telemetry.config (key, value) VALUES
     -- P0: Statement and lock timeouts (applied in collection functions)
     ('statement_timeout_ms', '2000'),          -- Max total collection time (REDUCED from 5000ms)
     ('lock_timeout_ms', '500'),                -- Max wait for catalog locks (REDUCED from 1000ms)
-    ('work_mem_kb', '2048'),                   -- work_mem limit for telemetry queries (2MB)
+    ('work_mem_kb', '2048'),                   -- work_mem limit for flight recorder queries (2MB)
     -- P0: Cost-based skip thresholds (NEW - proactive checks before expensive queries)
     ('skip_locks_threshold', '200'),           -- Skip lock collection if > N blocked locks
     ('skip_activity_conn_threshold', '400'),   -- Skip activity if > N active connections
@@ -671,7 +671,7 @@ INSERT INTO telemetry.config (key, value) VALUES
     ('retention_statements_days', '30'),       -- Retention for pg_stat_statements snapshots
     ('retention_collection_stats_days', '30'), -- Retention for collection_stats table
     -- P3: Self-monitoring and health checks
-    ('self_monitoring_enabled', 'true'),       -- Track telemetry system performance
+    ('self_monitoring_enabled', 'true'),       -- Track flight recorder system performance
     ('health_check_enabled', 'true'),          -- Enable health check function
     -- P4: Advanced features
     ('alert_enabled', 'false'),                -- Enable alert notifications
@@ -683,7 +683,7 @@ ON CONFLICT (key) DO NOTHING;
 -- Table: collection_stats - Track collection performance for circuit breaker
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS telemetry.collection_stats (
+CREATE TABLE IF NOT EXISTS flight_recorder.collection_stats (
     id              SERIAL PRIMARY KEY,
     collection_type TEXT NOT NULL,  -- 'sample' or 'snapshot'
     started_at      TIMESTAMPTZ NOT NULL,
@@ -698,13 +698,13 @@ CREATE TABLE IF NOT EXISTS telemetry.collection_stats (
 );
 
 CREATE INDEX IF NOT EXISTS collection_stats_type_started_idx
-    ON telemetry.collection_stats(collection_type, started_at DESC);
+    ON flight_recorder.collection_stats(collection_type, started_at DESC);
 
 -- -----------------------------------------------------------------------------
 -- Helper: Check circuit breaker - should we skip collection?
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry._check_circuit_breaker(p_collection_type TEXT)
+CREATE OR REPLACE FUNCTION flight_recorder._check_circuit_breaker(p_collection_type TEXT)
 RETURNS BOOLEAN
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -715,7 +715,7 @@ DECLARE
 BEGIN
     -- Check if circuit breaker is enabled
     v_enabled := COALESCE(
-        telemetry._get_config('circuit_breaker_enabled', 'true')::boolean,
+        flight_recorder._get_config('circuit_breaker_enabled', 'true')::boolean,
         true
     );
 
@@ -725,13 +725,13 @@ BEGIN
 
     -- Get threshold
     v_threshold_ms := COALESCE(
-        telemetry._get_config('circuit_breaker_threshold_ms', '5000')::integer,
+        flight_recorder._get_config('circuit_breaker_threshold_ms', '5000')::integer,
         5000
     );
 
     -- Get look back window
     v_window_minutes := COALESCE(
-        telemetry._get_config('circuit_breaker_window_minutes', '15')::integer,
+        flight_recorder._get_config('circuit_breaker_window_minutes', '15')::integer,
         15
     );
 
@@ -739,7 +739,7 @@ BEGIN
     SELECT avg(duration_ms) INTO v_avg_duration_ms
     FROM (
         SELECT duration_ms
-        FROM telemetry.collection_stats
+        FROM flight_recorder.collection_stats
         WHERE collection_type = p_collection_type
           AND success = true
           AND skipped = false
@@ -762,13 +762,13 @@ $$;
 -- Helper: Record collection start
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry._record_collection_start(
+CREATE OR REPLACE FUNCTION flight_recorder._record_collection_start(
     p_collection_type TEXT,
     p_sections_total INTEGER DEFAULT NULL
 )
 RETURNS INTEGER
 LANGUAGE sql AS $$
-    INSERT INTO telemetry.collection_stats (collection_type, started_at, sections_total)
+    INSERT INTO flight_recorder.collection_stats (collection_type, started_at, sections_total)
     VALUES (p_collection_type, now(), p_sections_total)
     RETURNING id
 $$;
@@ -777,14 +777,14 @@ $$;
 -- Helper: Record collection completion
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry._record_collection_end(
+CREATE OR REPLACE FUNCTION flight_recorder._record_collection_end(
     p_stat_id INTEGER,
     p_success BOOLEAN,
     p_error_message TEXT DEFAULT NULL
 )
 RETURNS VOID
 LANGUAGE sql AS $$
-    UPDATE telemetry.collection_stats
+    UPDATE flight_recorder.collection_stats
     SET completed_at = now(),
         duration_ms = EXTRACT(EPOCH FROM (now() - started_at)) * 1000,
         success = p_success,
@@ -796,13 +796,13 @@ $$;
 -- Helper: Record skipped collection
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry._record_collection_skip(
+CREATE OR REPLACE FUNCTION flight_recorder._record_collection_skip(
     p_collection_type TEXT,
     p_reason TEXT
 )
 RETURNS VOID
 LANGUAGE sql AS $$
-    INSERT INTO telemetry.collection_stats (
+    INSERT INTO flight_recorder.collection_stats (
         collection_type, started_at, completed_at, skipped, skipped_reason
     )
     VALUES (p_collection_type, now(), now(), true, p_reason)
@@ -812,10 +812,10 @@ $$;
 -- Helper: Record section success (increment counter)
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry._record_section_success(p_stat_id INTEGER)
+CREATE OR REPLACE FUNCTION flight_recorder._record_section_success(p_stat_id INTEGER)
 RETURNS VOID
 LANGUAGE sql AS $$
-    UPDATE telemetry.collection_stats
+    UPDATE flight_recorder.collection_stats
     SET sections_succeeded = COALESCE(sections_succeeded, 0) + 1
     WHERE id = p_stat_id
 $$;
@@ -824,11 +824,11 @@ $$;
 -- Helper: Get config value with default
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry._get_config(p_key TEXT, p_default TEXT DEFAULT NULL)
+CREATE OR REPLACE FUNCTION flight_recorder._get_config(p_key TEXT, p_default TEXT DEFAULT NULL)
 RETURNS TEXT
 LANGUAGE sql STABLE AS $$
     SELECT COALESCE(
-        (SELECT value FROM telemetry.config WHERE key = p_key),
+        (SELECT value FROM flight_recorder.config WHERE key = p_key),
         p_default
     )
 $$;
@@ -837,7 +837,7 @@ $$;
 -- P2: Helper: Automatic mode switching based on system load
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry._check_and_adjust_mode()
+CREATE OR REPLACE FUNCTION flight_recorder._check_and_adjust_mode()
 RETURNS TABLE(
     previous_mode TEXT,
     new_mode TEXT,
@@ -859,7 +859,7 @@ DECLARE
 BEGIN
     -- Check if automatic mode switching is enabled
     v_enabled := COALESCE(
-        telemetry._get_config('auto_mode_enabled', 'false')::boolean,
+        flight_recorder._get_config('auto_mode_enabled', 'false')::boolean,
         false
     );
 
@@ -868,13 +868,13 @@ BEGIN
     END IF;
 
     -- Get current mode and thresholds
-    v_current_mode := telemetry._get_config('mode', 'normal');
+    v_current_mode := flight_recorder._get_config('mode', 'normal');
     v_connections_threshold := COALESCE(
-        telemetry._get_config('auto_mode_connections_threshold', '80')::integer,
+        flight_recorder._get_config('auto_mode_connections_threshold', '80')::integer,
         80
     );
     v_trips_threshold := COALESCE(
-        telemetry._get_config('auto_mode_trips_threshold', '3')::integer,
+        flight_recorder._get_config('auto_mode_trips_threshold', '3')::integer,
         3
     );
 
@@ -895,7 +895,7 @@ BEGIN
     -- 2. Recent circuit breaker trips (last 10 minutes)
     SELECT count(*)
     INTO v_recent_trips
-    FROM telemetry.collection_stats
+    FROM flight_recorder.collection_stats
     WHERE skipped = true
       AND started_at > now() - interval '10 minutes'
       AND skipped_reason LIKE '%Circuit breaker%';
@@ -930,9 +930,9 @@ BEGIN
     -- Apply mode change if suggested mode differs from current
     IF v_suggested_mode != v_current_mode THEN
         -- Use set_mode to apply the change (handles cron rescheduling)
-        PERFORM telemetry.set_mode(v_suggested_mode);
+        PERFORM flight_recorder.set_mode(v_suggested_mode);
 
-        RAISE NOTICE 'pg-telemetry: Auto-mode switched from % to %: %',
+        RAISE NOTICE 'pg-flight-recorder: Auto-mode switched from % to %: %',
                      v_current_mode, v_suggested_mode, v_reason;
 
         RETURN QUERY SELECT v_current_mode, v_suggested_mode, v_reason, true;
@@ -947,7 +947,7 @@ $$;
 -- Helper: Check if pg_stat_statements is available
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry._has_pg_stat_statements()
+CREATE OR REPLACE FUNCTION flight_recorder._has_pg_stat_statements()
 RETURNS BOOLEAN
 LANGUAGE sql STABLE AS $$
     SELECT EXISTS (
@@ -959,7 +959,7 @@ $$;
 -- Helper: Check pg_stat_statements health (utilization and churn)
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry._check_statements_health()
+CREATE OR REPLACE FUNCTION flight_recorder._check_statements_health()
 RETURNS TABLE(
     current_statements BIGINT,
     max_statements INTEGER,
@@ -974,7 +974,7 @@ DECLARE
     v_dealloc BIGINT;
 BEGIN
     -- Check if pg_stat_statements is available
-    IF NOT telemetry._has_pg_stat_statements() THEN
+    IF NOT flight_recorder._has_pg_stat_statements() THEN
         RETURN QUERY SELECT 0::bigint, 0::integer, 0::numeric, 0::bigint, 'DISABLED'::text;
         RETURN;
     END IF;
@@ -1021,7 +1021,7 @@ $$;
 -- P1 Safety: Check schema size and enforce limits
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry._check_schema_size()
+CREATE OR REPLACE FUNCTION flight_recorder._check_schema_size()
 RETURNS TABLE(
     schema_size_mb NUMERIC,
     warning_threshold_mb INTEGER,
@@ -1039,7 +1039,7 @@ DECLARE
 BEGIN
     -- Check if schema size checking is enabled
     v_check_enabled := COALESCE(
-        telemetry._get_config('schema_size_check_enabled', 'true')::boolean,
+        flight_recorder._get_config('schema_size_check_enabled', 'true')::boolean,
         true
     );
 
@@ -1050,20 +1050,20 @@ BEGIN
 
     -- Get thresholds from config
     v_warning_mb := COALESCE(
-        telemetry._get_config('schema_size_warning_mb', '5000')::integer,
+        flight_recorder._get_config('schema_size_warning_mb', '5000')::integer,
         5000
     );
     v_critical_mb := COALESCE(
-        telemetry._get_config('schema_size_critical_mb', '10000')::integer,
+        flight_recorder._get_config('schema_size_critical_mb', '10000')::integer,
         10000
     );
 
-    -- Calculate total schema size (all tables in telemetry schema)
+    -- Calculate total schema size (all tables in flight recorder schema)
     SELECT COALESCE(sum(pg_total_relation_size(c.oid)), 0)
     INTO v_size_bytes
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = 'telemetry'
+    WHERE n.nspname = 'flight_recorder'
       AND c.relkind IN ('r', 'i', 't');  -- tables, indexes, TOAST
 
     v_size_mb := round(v_size_bytes / 1024.0 / 1024.0, 2);
@@ -1072,7 +1072,7 @@ BEGIN
     IF v_size_mb >= v_critical_mb THEN
         -- Critical: auto-disable collection
         BEGIN
-            PERFORM telemetry.disable();
+            PERFORM flight_recorder.disable();
             RETURN QUERY SELECT
                 v_size_mb,
                 v_warning_mb,
@@ -1089,7 +1089,7 @@ BEGIN
         END;
     ELSIF v_size_mb >= v_warning_mb THEN
         -- Warning: log but continue
-        RAISE WARNING 'pg-telemetry: Schema size (% MB) exceeds warning threshold (% MB). Consider running cleanup or reducing retention.',
+        RAISE WARNING 'pg-flight-recorder: Schema size (% MB) exceeds warning threshold (% MB). Consider running cleanup or reducing retention.',
             v_size_mb, v_warning_mb;
         RETURN QUERY SELECT
             v_size_mb,
@@ -1116,7 +1116,7 @@ $$;
 -- WARNING: Each tracked table adds ~10-50ms overhead per snapshot (every 5 min)
 -- Due to pg_relation_size(), pg_total_relation_size(), pg_indexes_size() calls
 -- Recommend tracking max 5-20 critical tables
-CREATE OR REPLACE FUNCTION telemetry.track_table(p_table TEXT, p_schema TEXT DEFAULT 'public')
+CREATE OR REPLACE FUNCTION flight_recorder.track_table(p_table TEXT, p_schema TEXT DEFAULT 'public')
 RETURNS TEXT
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -1131,7 +1131,7 @@ BEGIN
         RAISE EXCEPTION 'Table %.% not found', p_schema, p_table;
     END IF;
 
-    INSERT INTO telemetry.tracked_tables (relid, schemaname, relname)
+    INSERT INTO flight_recorder.tracked_tables (relid, schemaname, relname)
     VALUES (v_relid, p_schema, p_table)
     ON CONFLICT (relid) DO NOTHING;
 
@@ -1139,11 +1139,11 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION telemetry.untrack_table(p_table TEXT, p_schema TEXT DEFAULT 'public')
+CREATE OR REPLACE FUNCTION flight_recorder.untrack_table(p_table TEXT, p_schema TEXT DEFAULT 'public')
 RETURNS TEXT
 LANGUAGE plpgsql AS $$
 BEGIN
-    DELETE FROM telemetry.tracked_tables
+    DELETE FROM flight_recorder.tracked_tables
     WHERE relname = p_table AND schemaname = p_schema;
 
     IF NOT FOUND THEN
@@ -1154,17 +1154,17 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION telemetry.list_tracked_tables()
+CREATE OR REPLACE FUNCTION flight_recorder.list_tracked_tables()
 RETURNS TABLE(schemaname TEXT, relname TEXT, added_at TIMESTAMPTZ)
 LANGUAGE sql STABLE AS $$
-    SELECT schemaname, relname, added_at FROM telemetry.tracked_tables ORDER BY added_at;
+    SELECT schemaname, relname, added_at FROM flight_recorder.tracked_tables ORDER BY added_at;
 $$;
 
 -- -----------------------------------------------------------------------------
--- telemetry.sample() - High-frequency sampling (wait events, activity, progress, locks)
+-- flight_recorder.sample() - High-frequency sampling (wait events, activity, progress, locks)
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry.sample()
+CREATE OR REPLACE FUNCTION flight_recorder.sample()
 RETURNS TIMESTAMPTZ
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -1177,49 +1177,49 @@ DECLARE
     v_should_skip BOOLEAN;
 BEGIN
     -- P2 Safety: Check and adjust mode automatically based on system load
-    PERFORM telemetry._check_and_adjust_mode();
+    PERFORM flight_recorder._check_and_adjust_mode();
 
     -- P0 Safety: Check circuit breaker
-    v_should_skip := telemetry._check_circuit_breaker('sample');
+    v_should_skip := flight_recorder._check_circuit_breaker('sample');
     IF v_should_skip THEN
-        PERFORM telemetry._record_collection_skip('sample', 'Circuit breaker tripped - last run exceeded threshold');
-        RAISE NOTICE 'pg-telemetry: Skipping sample collection due to circuit breaker';
+        PERFORM flight_recorder._record_collection_skip('sample', 'Circuit breaker tripped - last run exceeded threshold');
+        RAISE NOTICE 'pg-flight-recorder: Skipping sample collection due to circuit breaker';
         RETURN v_captured_at;
     END IF;
 
     -- P0 Safety: Record collection start for circuit breaker (4 sections: wait events, activity, progress, locks)
-    v_stat_id := telemetry._record_collection_start('sample', 4);
+    v_stat_id := flight_recorder._record_collection_start('sample', 4);
 
     -- P0 Safety: Set timeouts and resource limits (A-GRADE: REDUCED THRESHOLDS)
     PERFORM set_config('statement_timeout',
-        COALESCE(telemetry._get_config('statement_timeout_ms', '2000'), '2000'),
+        COALESCE(flight_recorder._get_config('statement_timeout_ms', '2000'), '2000'),
         true);  -- REDUCED from 5000ms to 2000ms
     PERFORM set_config('lock_timeout',
-        COALESCE(telemetry._get_config('lock_timeout_ms', '500'), '500'),
+        COALESCE(flight_recorder._get_config('lock_timeout_ms', '500'), '500'),
         true);  -- REDUCED from 1000ms to 500ms
     PERFORM set_config('work_mem',
-        COALESCE(telemetry._get_config('work_mem_kb', '2048'), '2048') || 'kB',
+        COALESCE(flight_recorder._get_config('work_mem_kb', '2048'), '2048') || 'kB',
         true);  -- NEW: Limit memory for joins/sorts
 
     -- Get configuration
     v_enable_locks := COALESCE(
-        telemetry._get_config('enable_locks', 'true')::boolean,
+        flight_recorder._get_config('enable_locks', 'true')::boolean,
         TRUE
     );
     v_enable_progress := COALESCE(
-        telemetry._get_config('enable_progress', 'true')::boolean,
+        flight_recorder._get_config('enable_progress', 'true')::boolean,
         TRUE
     );
-    v_pg_version := telemetry._pg_version();
+    v_pg_version := flight_recorder._pg_version();
 
     -- Create sample record
-    INSERT INTO telemetry.samples (captured_at)
+    INSERT INTO flight_recorder.samples (captured_at)
     VALUES (v_captured_at)
     RETURNING id INTO v_sample_id;
 
     -- P0 Safety: Wait events with exception handling
     BEGIN
-        INSERT INTO telemetry.wait_samples (sample_id, sample_captured_at, backend_type, wait_event_type, wait_event, state, count)
+        INSERT INTO flight_recorder.wait_samples (sample_id, sample_captured_at, backend_type, wait_event_type, wait_event, state, count)
         SELECT
             v_sample_id,
             v_captured_at,
@@ -1232,9 +1232,9 @@ BEGIN
         WHERE pid != pg_backend_pid()
         GROUP BY backend_type, wait_event_type, wait_event, state;
 
-        PERFORM telemetry._record_section_success(v_stat_id);
+        PERFORM flight_recorder._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
-        RAISE WARNING 'pg-telemetry: Wait events collection failed: %', SQLERRM;
+        RAISE WARNING 'pg-flight-recorder: Wait events collection failed: %', SQLERRM;
     END;
 
     -- P0 Safety: Active sessions with exception handling and cost-based skip logic
@@ -1245,7 +1245,7 @@ BEGIN
             v_skip_activity_threshold INTEGER;
         BEGIN
             v_skip_activity_threshold := COALESCE(
-                telemetry._get_config('skip_activity_conn_threshold', '400')::integer,
+                flight_recorder._get_config('skip_activity_conn_threshold', '400')::integer,
                 400
             );
 
@@ -1255,11 +1255,11 @@ BEGIN
             WHERE state != 'idle' AND pid != pg_backend_pid();
 
             IF v_active_conn_count > v_skip_activity_threshold THEN
-                RAISE NOTICE 'pg-telemetry: Skipping activity collection - % active connections exceeds threshold %',
+                RAISE NOTICE 'pg-flight-recorder: Skipping activity collection - % active connections exceeds threshold %',
                     v_active_conn_count, v_skip_activity_threshold;
             ELSE
                 -- Safe to collect activity samples
-                INSERT INTO telemetry.activity_samples (
+                INSERT INTO flight_recorder.activity_samples (
                     sample_id, sample_captured_at, pid, usename, application_name, backend_type,
                     state, wait_event_type, wait_event, query_start, state_change, query_preview
                 )
@@ -1283,9 +1283,9 @@ BEGIN
             END IF;
         END;
 
-        PERFORM telemetry._record_section_success(v_stat_id);
+        PERFORM flight_recorder._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
-        RAISE WARNING 'pg-telemetry: Activity samples collection failed: %', SQLERRM;
+        RAISE WARNING 'pg-flight-recorder: Activity samples collection failed: %', SQLERRM;
     END;
 
     -- P0 Safety: Progress tracking with exception handling
@@ -1293,7 +1293,7 @@ BEGIN
     BEGIN
         -- Vacuum progress (handle PG17 column changes)
         IF v_pg_version >= 17 THEN
-            INSERT INTO telemetry.progress_samples (
+            INSERT INTO flight_recorder.progress_samples (
                 sample_id, sample_captured_at, progress_type, pid, relid, relname, phase,
                 blocks_total, blocks_done, tuples_total, tuples_done, details
             )
@@ -1316,7 +1316,7 @@ BEGIN
                 )
             FROM pg_stat_progress_vacuum p;
         ELSE
-            INSERT INTO telemetry.progress_samples (
+            INSERT INTO flight_recorder.progress_samples (
                 sample_id, sample_captured_at, progress_type, pid, relid, relname, phase,
                 blocks_total, blocks_done, tuples_total, tuples_done, details
             )
@@ -1340,7 +1340,7 @@ BEGIN
         END IF;
 
         -- COPY progress
-        INSERT INTO telemetry.progress_samples (
+        INSERT INTO flight_recorder.progress_samples (
             sample_id, sample_captured_at, progress_type, pid, relid, relname, phase,
             tuples_done, bytes_total, bytes_done, details
         )
@@ -1361,7 +1361,7 @@ BEGIN
         FROM pg_stat_progress_copy p;
 
         -- Analyze progress
-        INSERT INTO telemetry.progress_samples (
+        INSERT INTO flight_recorder.progress_samples (
             sample_id, sample_captured_at, progress_type, pid, relid, relname, phase,
             blocks_total, blocks_done, details
         )
@@ -1384,7 +1384,7 @@ BEGIN
         FROM pg_stat_progress_analyze p;
 
         -- Create index progress
-        INSERT INTO telemetry.progress_samples (
+        INSERT INTO flight_recorder.progress_samples (
             sample_id, sample_captured_at, progress_type, pid, relid, relname, phase,
             blocks_total, blocks_done, tuples_total, tuples_done, details
         )
@@ -1410,9 +1410,9 @@ BEGIN
             )
         FROM pg_stat_progress_create_index p;
 
-        PERFORM telemetry._record_section_success(v_stat_id);
+        PERFORM flight_recorder._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
-        RAISE WARNING 'pg-telemetry: Progress tracking collection failed: %', SQLERRM;
+        RAISE WARNING 'pg-flight-recorder: Progress tracking collection failed: %', SQLERRM;
     END;
     END IF;  -- v_enable_progress
 
@@ -1427,7 +1427,7 @@ BEGIN
             v_skip_locks_threshold INTEGER;
         BEGIN
             v_skip_locks_threshold := COALESCE(
-                telemetry._get_config('skip_locks_threshold', '200')::integer,
+                flight_recorder._get_config('skip_locks_threshold', '200')::integer,
                 200
             );
 
@@ -1437,11 +1437,11 @@ BEGIN
             WHERE NOT granted AND pid != pg_backend_pid();
 
             IF v_blocked_lock_count > v_skip_locks_threshold THEN
-                RAISE NOTICE 'pg-telemetry: Skipping lock collection - % blocked locks exceeds threshold % (potential lock storm)',
+                RAISE NOTICE 'pg-flight-recorder: Skipping lock collection - % blocked locks exceeds threshold % (potential lock storm)',
                     v_blocked_lock_count, v_skip_locks_threshold;
             ELSE
                 -- Safe to collect lock samples
-                INSERT INTO telemetry.lock_samples (
+                INSERT INTO flight_recorder.lock_samples (
                     sample_id, sample_captured_at, blocked_pid, blocked_user, blocked_app, blocked_query_preview, blocked_duration,
                     blocking_pid, blocking_user, blocking_app, blocking_query_preview, lock_type, locked_relation
                 )
@@ -1449,7 +1449,7 @@ BEGIN
                     SELECT bl.*
                     FROM pg_locks bl
                     WHERE NOT bl.granted  -- FILTER EARLY: only locks that are blocked
-                      AND bl.pid != pg_backend_pid()  -- Don't monitor telemetry itself
+                      AND bl.pid != pg_backend_pid()  -- Don't monitor flight recorder itself
                 ),
                 blocking_locks AS (
                     SELECT kl.*
@@ -1491,29 +1491,29 @@ BEGIN
             END IF;  -- Cost-based skip check
         END;  -- Close nested DECLARE block
 
-        PERFORM telemetry._record_section_success(v_stat_id);
+        PERFORM flight_recorder._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
-        RAISE WARNING 'pg-telemetry: Lock sampling collection failed: %', SQLERRM;
+        RAISE WARNING 'pg-flight-recorder: Lock sampling collection failed: %', SQLERRM;
     END;
     END IF;  -- v_enable_locks
 
     -- P0 Safety: Record successful completion
-    PERFORM telemetry._record_collection_end(v_stat_id, true, NULL);
+    PERFORM flight_recorder._record_collection_end(v_stat_id, true, NULL);
 
     RETURN v_captured_at;
 EXCEPTION
     WHEN OTHERS THEN
         -- P0 Safety: Record failure if entire function fails
-        PERFORM telemetry._record_collection_end(v_stat_id, false, SQLERRM);
+        PERFORM flight_recorder._record_collection_end(v_stat_id, false, SQLERRM);
         RAISE;
 END;
 $$;
 
 -- -----------------------------------------------------------------------------
--- telemetry.snapshot() - Capture current state
+-- flight_recorder.snapshot() - Capture current state
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry.snapshot()
+CREATE OR REPLACE FUNCTION flight_recorder.snapshot()
 RETURNS TIMESTAMPTZ
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -1541,31 +1541,31 @@ DECLARE
     v_should_skip BOOLEAN;
 BEGIN
     -- P0 Safety: Check circuit breaker
-    v_should_skip := telemetry._check_circuit_breaker('snapshot');
+    v_should_skip := flight_recorder._check_circuit_breaker('snapshot');
     IF v_should_skip THEN
-        PERFORM telemetry._record_collection_skip('snapshot', 'Circuit breaker tripped - last run exceeded threshold');
-        RAISE NOTICE 'pg-telemetry: Skipping snapshot collection due to circuit breaker';
+        PERFORM flight_recorder._record_collection_skip('snapshot', 'Circuit breaker tripped - last run exceeded threshold');
+        RAISE NOTICE 'pg-flight-recorder: Skipping snapshot collection due to circuit breaker';
         RETURN v_captured_at;
     END IF;
 
     -- P1 Safety: Check schema size (runs every 5 minutes, auto-disables if critical)
-    PERFORM telemetry._check_schema_size();
+    PERFORM flight_recorder._check_schema_size();
 
     -- P0 Safety: Record collection start for circuit breaker (5 sections: system stats, snapshot INSERT, tracked tables, replication, statements)
-    v_stat_id := telemetry._record_collection_start('snapshot', 5);
+    v_stat_id := flight_recorder._record_collection_start('snapshot', 5);
 
     -- P0 Safety: Set timeouts and resource limits (A-GRADE: REDUCED THRESHOLDS)
     PERFORM set_config('statement_timeout',
-        COALESCE(telemetry._get_config('statement_timeout_ms', '2000'), '2000'),
+        COALESCE(flight_recorder._get_config('statement_timeout_ms', '2000'), '2000'),
         true);  -- REDUCED from 5000ms to 2000ms
     PERFORM set_config('lock_timeout',
-        COALESCE(telemetry._get_config('lock_timeout_ms', '500'), '500'),
+        COALESCE(flight_recorder._get_config('lock_timeout_ms', '500'), '500'),
         true);  -- REDUCED from 1000ms to 500ms
     PERFORM set_config('work_mem',
-        COALESCE(telemetry._get_config('work_mem_kb', '2048'), '2048') || 'kB',
+        COALESCE(flight_recorder._get_config('work_mem_kb', '2048'), '2048') || 'kB',
         true);  -- NEW: Limit memory for joins/sorts
 
-    v_pg_version := telemetry._pg_version();
+    v_pg_version := flight_recorder._pg_version();
 
     -- P0 Safety: Collect system stats with exception handling
     BEGIN
@@ -1587,9 +1587,9 @@ BEGIN
         FROM pg_stat_database
         WHERE datname = current_database();
 
-        PERFORM telemetry._record_section_success(v_stat_id);
+        PERFORM flight_recorder._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
-        RAISE WARNING 'pg-telemetry: System stats collection failed: %', SQLERRM;
+        RAISE WARNING 'pg-flight-recorder: System stats collection failed: %', SQLERRM;
         -- Set defaults so snapshot can continue
         v_autovacuum_workers := 0;
         v_slots_count := 0;
@@ -1621,7 +1621,7 @@ BEGIN
             v_io_bgw_writes, v_io_bgw_write_time
         FROM pg_stat_io;
     EXCEPTION WHEN OTHERS THEN
-        RAISE WARNING 'pg-telemetry: pg_stat_io collection failed: %', SQLERRM;
+        RAISE WARNING 'pg-flight-recorder: pg_stat_io collection failed: %', SQLERRM;
         -- Set defaults
         v_io_ckpt_writes := 0;
         v_io_ckpt_write_time := 0;
@@ -1638,7 +1638,7 @@ BEGIN
 
     IF v_pg_version = 17 THEN
         -- PG17: checkpointer stats in pg_stat_checkpointer
-        INSERT INTO telemetry.snapshots (
+        INSERT INTO flight_recorder.snapshots (
             captured_at, pg_version,
             wal_records, wal_fpi, wal_bytes, wal_write_time, wal_sync_time,
             checkpoint_lsn, checkpoint_time,
@@ -1673,7 +1673,7 @@ BEGIN
 
     ELSIF v_pg_version = 16 THEN
         -- PG16: checkpointer stats in pg_stat_bgwriter, has pg_stat_io
-        INSERT INTO telemetry.snapshots (
+        INSERT INTO flight_recorder.snapshots (
             captured_at, pg_version,
             wal_records, wal_fpi, wal_bytes, wal_write_time, wal_sync_time,
             checkpoint_lsn, checkpoint_time,
@@ -1707,7 +1707,7 @@ BEGIN
 
     ELSIF v_pg_version = 15 THEN
         -- PG15: checkpointer stats in pg_stat_bgwriter, no pg_stat_io
-        INSERT INTO telemetry.snapshots (
+        INSERT INTO flight_recorder.snapshots (
             captured_at, pg_version,
             wal_records, wal_fpi, wal_bytes, wal_write_time, wal_sync_time,
             checkpoint_lsn, checkpoint_time,
@@ -1735,11 +1735,11 @@ BEGIN
     END IF;
 
     -- Main snapshot INSERT completed successfully
-    PERFORM telemetry._record_section_success(v_stat_id);
+    PERFORM flight_recorder._record_section_success(v_stat_id);
 
     -- P0 Safety: Capture stats for tracked tables with exception handling
     BEGIN
-        INSERT INTO telemetry.table_snapshots (
+        INSERT INTO flight_recorder.table_snapshots (
             snapshot_id, relid, schemaname, relname,
             pg_relation_size, pg_total_relation_size, pg_indexes_size,
             n_live_tup, n_dead_tup,
@@ -1769,17 +1769,17 @@ BEGIN
             s.autovacuum_count,
             s.analyze_count,
             s.autoanalyze_count
-        FROM telemetry.tracked_tables t
+        FROM flight_recorder.tracked_tables t
         JOIN pg_stat_user_tables s ON s.relid = t.relid;
 
-        PERFORM telemetry._record_section_success(v_stat_id);
+        PERFORM flight_recorder._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
-        RAISE WARNING 'pg-telemetry: Tracked tables collection failed: %', SQLERRM;
+        RAISE WARNING 'pg-flight-recorder: Tracked tables collection failed: %', SQLERRM;
     END;
 
     -- P0 Safety: Capture replication stats with exception handling
     BEGIN
-        INSERT INTO telemetry.replication_snapshots (
+        INSERT INTO flight_recorder.replication_snapshots (
             snapshot_id, pid, client_addr, application_name, state, sync_state,
             sent_lsn, write_lsn, flush_lsn, replay_lsn,
             write_lag, flush_lag, replay_lag
@@ -1800,27 +1800,27 @@ BEGIN
             replay_lag
         FROM pg_stat_replication;
 
-        PERFORM telemetry._record_section_success(v_stat_id);
+        PERFORM flight_recorder._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
-        RAISE WARNING 'pg-telemetry: Replication stats collection failed: %', SQLERRM;
+        RAISE WARNING 'pg-flight-recorder: Replication stats collection failed: %', SQLERRM;
     END;
 
     -- Capture pg_stat_statements (if available and enabled)
-    IF telemetry._has_pg_stat_statements()
-       AND telemetry._get_config('statements_enabled', 'auto') != 'false'
+    IF flight_recorder._has_pg_stat_statements()
+       AND flight_recorder._get_config('statements_enabled', 'auto') != 'false'
     THEN
         DECLARE
             v_stmt_status TEXT;
         BEGIN
             -- Check if statement tracking is healthy (not under high churn)
             SELECT status INTO v_stmt_status
-            FROM telemetry._check_statements_health();
+            FROM flight_recorder._check_statements_health();
 
             -- Skip if utilization too high (indicates excessive churn)
             IF v_stmt_status = 'HIGH_CHURN' THEN
-                RAISE WARNING 'pg-telemetry: Skipping pg_stat_statements collection - high churn detected (>95%% utilization)';
+                RAISE WARNING 'pg-flight-recorder: Skipping pg_stat_statements collection - high churn detected (>95%% utilization)';
             ELSE
-                INSERT INTO telemetry.statement_snapshots (
+                INSERT INTO flight_recorder.statement_snapshots (
                 snapshot_id, queryid, userid, dbid, query_preview,
                 calls, total_exec_time, min_exec_time, max_exec_time,
                 mean_exec_time, rows,
@@ -1853,37 +1853,37 @@ BEGIN
                 s.wal_bytes
             FROM pg_stat_statements s
             WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
-              AND s.calls >= COALESCE(telemetry._get_config('statements_min_calls', '1')::integer, 1)
+              AND s.calls >= COALESCE(flight_recorder._get_config('statements_min_calls', '1')::integer, 1)
             ORDER BY s.total_exec_time DESC
-            LIMIT COALESCE(telemetry._get_config('statements_top_n', '50')::integer, 50);
+            LIMIT COALESCE(flight_recorder._get_config('statements_top_n', '50')::integer, 50);
 
-                PERFORM telemetry._record_section_success(v_stat_id);
+                PERFORM flight_recorder._record_section_success(v_stat_id);
             END IF;  -- v_stmt_status check
         EXCEPTION
             WHEN undefined_table THEN NULL;
             WHEN undefined_column THEN NULL;
             WHEN OTHERS THEN
-                RAISE WARNING 'pg-telemetry: pg_stat_statements collection failed: %', SQLERRM;
+                RAISE WARNING 'pg-flight-recorder: pg_stat_statements collection failed: %', SQLERRM;
         END;
     END IF;
 
     -- P0 Safety: Record successful completion
-    PERFORM telemetry._record_collection_end(v_stat_id, true, NULL);
+    PERFORM flight_recorder._record_collection_end(v_stat_id, true, NULL);
 
     RETURN v_captured_at;
 EXCEPTION
     WHEN OTHERS THEN
         -- P0 Safety: Record failure if entire function fails
-        PERFORM telemetry._record_collection_end(v_stat_id, false, SQLERRM);
+        PERFORM flight_recorder._record_collection_end(v_stat_id, false, SQLERRM);
         RAISE;
 END;
 $$;
 
 -- -----------------------------------------------------------------------------
--- telemetry.deltas - View showing deltas between consecutive snapshots
+-- flight_recorder.deltas - View showing deltas between consecutive snapshots
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW telemetry.deltas AS
+CREATE OR REPLACE VIEW flight_recorder.deltas AS
 SELECT
     s.id,
     s.captured_at,
@@ -1900,7 +1900,7 @@ SELECT
 
     -- WAL
     s.wal_bytes - prev.wal_bytes AS wal_bytes_delta,
-    telemetry._pretty_bytes(s.wal_bytes - prev.wal_bytes) AS wal_bytes_pretty,
+    flight_recorder._pretty_bytes(s.wal_bytes - prev.wal_bytes) AS wal_bytes_pretty,
     (s.wal_write_time - prev.wal_write_time)::numeric AS wal_write_time_ms,
     (s.wal_sync_time - prev.wal_sync_time)::numeric AS wal_sync_time_ms,
 
@@ -1916,7 +1916,7 @@ SELECT
     -- Replication slots (point-in-time)
     s.slots_count,
     s.slots_max_retained_wal,
-    telemetry._pretty_bytes(s.slots_max_retained_wal) AS slots_max_retained_pretty,
+    flight_recorder._pretty_bytes(s.slots_max_retained_wal) AS slots_max_retained_pretty,
 
     -- pg_stat_io deltas (PG16+)
     s.io_checkpointer_writes - prev.io_checkpointer_writes AS io_ckpt_writes_delta,
@@ -1933,19 +1933,19 @@ SELECT
     -- Temp file deltas
     s.temp_files - prev.temp_files AS temp_files_delta,
     s.temp_bytes - prev.temp_bytes AS temp_bytes_delta,
-    telemetry._pretty_bytes(s.temp_bytes - prev.temp_bytes) AS temp_bytes_pretty
+    flight_recorder._pretty_bytes(s.temp_bytes - prev.temp_bytes) AS temp_bytes_pretty
 
-FROM telemetry.snapshots s
-JOIN telemetry.snapshots prev ON prev.id = (
-    SELECT MAX(id) FROM telemetry.snapshots WHERE id < s.id
+FROM flight_recorder.snapshots s
+JOIN flight_recorder.snapshots prev ON prev.id = (
+    SELECT MAX(id) FROM flight_recorder.snapshots WHERE id < s.id
 )
 ORDER BY s.captured_at DESC;
 
 -- -----------------------------------------------------------------------------
--- telemetry.compare(start_time, end_time) - Compare two time points
+-- flight_recorder.compare(start_time, end_time) - Compare two time points
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry.compare(
+CREATE OR REPLACE FUNCTION flight_recorder.compare(
     p_start_time TIMESTAMPTZ,
     p_end_time TIMESTAMPTZ
 )
@@ -1996,13 +1996,13 @@ RETURNS TABLE(
 LANGUAGE sql STABLE AS $$
     WITH
     start_snap AS (
-        SELECT * FROM telemetry.snapshots
+        SELECT * FROM flight_recorder.snapshots
         WHERE captured_at <= p_start_time
         ORDER BY captured_at DESC
         LIMIT 1
     ),
     end_snap AS (
-        SELECT * FROM telemetry.snapshots
+        SELECT * FROM flight_recorder.snapshots
         WHERE captured_at >= p_end_time
         ORDER BY captured_at ASC
         LIMIT 1
@@ -2020,7 +2020,7 @@ LANGUAGE sql STABLE AS $$
         e.ckpt_buffers - s.ckpt_buffers,
 
         e.wal_bytes - s.wal_bytes,
-        telemetry._pretty_bytes(e.wal_bytes - s.wal_bytes),
+        flight_recorder._pretty_bytes(e.wal_bytes - s.wal_bytes),
         (e.wal_write_time - s.wal_write_time)::numeric,
         (e.wal_sync_time - s.wal_sync_time)::numeric,
 
@@ -2031,7 +2031,7 @@ LANGUAGE sql STABLE AS $$
 
         e.slots_count,
         e.slots_max_retained_wal,
-        telemetry._pretty_bytes(e.slots_max_retained_wal),
+        flight_recorder._pretty_bytes(e.slots_max_retained_wal),
 
         e.io_checkpointer_writes - s.io_checkpointer_writes,
         (e.io_checkpointer_write_time - s.io_checkpointer_write_time)::numeric,
@@ -2046,15 +2046,15 @@ LANGUAGE sql STABLE AS $$
 
         e.temp_files - s.temp_files,
         e.temp_bytes - s.temp_bytes,
-        telemetry._pretty_bytes(e.temp_bytes - s.temp_bytes)
+        flight_recorder._pretty_bytes(e.temp_bytes - s.temp_bytes)
     FROM start_snap s, end_snap e
 $$;
 
 -- -----------------------------------------------------------------------------
--- telemetry.table_deltas - View showing deltas for tracked tables
+-- flight_recorder.table_deltas - View showing deltas for tracked tables
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW telemetry.table_deltas AS
+CREATE OR REPLACE VIEW flight_recorder.table_deltas AS
 SELECT
     ts.snapshot_id,
     s.captured_at,
@@ -2064,7 +2064,7 @@ SELECT
 
     -- Size changes
     ts.pg_relation_size - prev_ts.pg_relation_size AS size_delta_bytes,
-    telemetry._pretty_bytes(ts.pg_relation_size - prev_ts.pg_relation_size) AS size_delta_pretty,
+    flight_recorder._pretty_bytes(ts.pg_relation_size - prev_ts.pg_relation_size) AS size_delta_pretty,
     ts.pg_total_relation_size - prev_ts.pg_total_relation_size AS total_size_delta_bytes,
 
     -- Tuple counts (point-in-time)
@@ -2086,23 +2086,23 @@ SELECT
     ts.last_autovacuum,
     ts.last_autoanalyze
 
-FROM telemetry.table_snapshots ts
-JOIN telemetry.snapshots s ON s.id = ts.snapshot_id
-JOIN telemetry.table_snapshots prev_ts ON (
+FROM flight_recorder.table_snapshots ts
+JOIN flight_recorder.snapshots s ON s.id = ts.snapshot_id
+JOIN flight_recorder.table_snapshots prev_ts ON (
     prev_ts.relid = ts.relid AND
     prev_ts.snapshot_id = (
-        SELECT MAX(snapshot_id) FROM telemetry.table_snapshots
+        SELECT MAX(snapshot_id) FROM flight_recorder.table_snapshots
         WHERE relid = ts.relid AND snapshot_id < ts.snapshot_id
     )
 )
-JOIN telemetry.snapshots prev_s ON prev_s.id = prev_ts.snapshot_id
+JOIN flight_recorder.snapshots prev_s ON prev_s.id = prev_ts.snapshot_id
 ORDER BY s.captured_at DESC, ts.relname;
 
 -- -----------------------------------------------------------------------------
--- telemetry.recent_waits - View of wait events from last 2 hours
+-- flight_recorder.recent_waits - View of wait events from last 2 hours
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW telemetry.recent_waits AS
+CREATE OR REPLACE VIEW flight_recorder.recent_waits AS
 SELECT
     sm.captured_at,
     w.backend_type,
@@ -2110,16 +2110,16 @@ SELECT
     w.wait_event,
     w.state,
     w.count
-FROM telemetry.samples sm
-JOIN telemetry.wait_samples w ON w.sample_id = sm.id
+FROM flight_recorder.samples sm
+JOIN flight_recorder.wait_samples w ON w.sample_id = sm.id
 WHERE sm.captured_at > now() - interval '2 hours'
 ORDER BY sm.captured_at DESC, w.count DESC;
 
 -- -----------------------------------------------------------------------------
--- telemetry.recent_activity - View of active sessions from last 2 hours
+-- flight_recorder.recent_activity - View of active sessions from last 2 hours
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW telemetry.recent_activity AS
+CREATE OR REPLACE VIEW flight_recorder.recent_activity AS
 SELECT
     sm.captured_at,
     a.pid,
@@ -2132,16 +2132,16 @@ SELECT
     a.query_start,
     sm.captured_at - a.query_start AS running_for,
     a.query_preview
-FROM telemetry.samples sm
-JOIN telemetry.activity_samples a ON a.sample_id = sm.id
+FROM flight_recorder.samples sm
+JOIN flight_recorder.activity_samples a ON a.sample_id = sm.id
 WHERE sm.captured_at > now() - interval '2 hours'
 ORDER BY sm.captured_at DESC, a.query_start ASC;
 
 -- -----------------------------------------------------------------------------
--- telemetry.recent_locks - View of lock contention from last 2 hours
+-- flight_recorder.recent_locks - View of lock contention from last 2 hours
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW telemetry.recent_locks AS
+CREATE OR REPLACE VIEW flight_recorder.recent_locks AS
 SELECT
     sm.captured_at,
     l.blocked_pid,
@@ -2155,16 +2155,16 @@ SELECT
     l.locked_relation,
     l.blocked_query_preview,
     l.blocking_query_preview
-FROM telemetry.samples sm
-JOIN telemetry.lock_samples l ON l.sample_id = sm.id
+FROM flight_recorder.samples sm
+JOIN flight_recorder.lock_samples l ON l.sample_id = sm.id
 WHERE sm.captured_at > now() - interval '2 hours'
 ORDER BY sm.captured_at DESC, l.blocked_duration DESC;
 
 -- -----------------------------------------------------------------------------
--- telemetry.recent_progress - View of operation progress from last 2 hours
+-- flight_recorder.recent_progress - View of operation progress from last 2 hours
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW telemetry.recent_progress AS
+CREATE OR REPLACE VIEW flight_recorder.recent_progress AS
 SELECT
     sm.captured_at,
     p.progress_type,
@@ -2180,18 +2180,18 @@ SELECT
     p.tuples_total,
     p.bytes_done,
     p.bytes_total,
-    telemetry._pretty_bytes(p.bytes_done) AS bytes_done_pretty,
+    flight_recorder._pretty_bytes(p.bytes_done) AS bytes_done_pretty,
     p.details
-FROM telemetry.samples sm
-JOIN telemetry.progress_samples p ON p.sample_id = sm.id
+FROM flight_recorder.samples sm
+JOIN flight_recorder.progress_samples p ON p.sample_id = sm.id
 WHERE sm.captured_at > now() - interval '2 hours'
 ORDER BY sm.captured_at DESC, p.progress_type, p.relname;
 
 -- -----------------------------------------------------------------------------
--- telemetry.recent_replication - View of replication lag from last 2 hours
+-- flight_recorder.recent_replication - View of replication lag from last 2 hours
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW telemetry.recent_replication AS
+CREATE OR REPLACE VIEW flight_recorder.recent_replication AS
 SELECT
     sn.captured_at,
     r.pid,
@@ -2205,20 +2205,20 @@ SELECT
     r.replay_lsn,
     -- Calculate lag in bytes from current WAL position at snapshot time
     pg_wal_lsn_diff(r.sent_lsn, r.replay_lsn)::bigint AS replay_lag_bytes,
-    telemetry._pretty_bytes(pg_wal_lsn_diff(r.sent_lsn, r.replay_lsn)::bigint) AS replay_lag_pretty,
+    flight_recorder._pretty_bytes(pg_wal_lsn_diff(r.sent_lsn, r.replay_lsn)::bigint) AS replay_lag_pretty,
     r.write_lag,
     r.flush_lag,
     r.replay_lag
-FROM telemetry.snapshots sn
-JOIN telemetry.replication_snapshots r ON r.snapshot_id = sn.id
+FROM flight_recorder.snapshots sn
+JOIN flight_recorder.replication_snapshots r ON r.snapshot_id = sn.id
 WHERE sn.captured_at > now() - interval '2 hours'
 ORDER BY sn.captured_at DESC, r.application_name;
 
 -- -----------------------------------------------------------------------------
--- telemetry.wait_summary() - Aggregate wait events over a time period
+-- flight_recorder.wait_summary() - Aggregate wait events over a time period
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry.wait_summary(
+CREATE OR REPLACE FUNCTION flight_recorder.wait_summary(
     p_start_time TIMESTAMPTZ,
     p_end_time TIMESTAMPTZ
 )
@@ -2235,7 +2235,7 @@ RETURNS TABLE(
 LANGUAGE sql STABLE AS $$
     WITH sample_range AS (
         SELECT id, captured_at
-        FROM telemetry.samples
+        FROM flight_recorder.samples
         WHERE captured_at BETWEEN p_start_time AND p_end_time
     ),
     total_samples AS (
@@ -2250,7 +2250,7 @@ LANGUAGE sql STABLE AS $$
         round(avg(w.count), 2) AS avg_waiters,
         max(w.count) AS max_waiters,
         round(100.0 * count(DISTINCT w.sample_id) / NULLIF(t.cnt, 0), 1) AS pct_of_samples
-    FROM telemetry.wait_samples w
+    FROM flight_recorder.wait_samples w
     JOIN sample_range sr ON sr.id = w.sample_id
     CROSS JOIN total_samples t
     WHERE w.state NOT IN ('idle', 'idle in transaction')
@@ -2259,10 +2259,10 @@ LANGUAGE sql STABLE AS $$
 $$;
 
 -- -----------------------------------------------------------------------------
--- telemetry.table_compare() - Compare table stats between two time points
+-- flight_recorder.table_compare() - Compare table stats between two time points
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry.table_compare(
+CREATE OR REPLACE FUNCTION flight_recorder.table_compare(
     p_table TEXT,
     p_start_time TIMESTAMPTZ,
     p_end_time TIMESTAMPTZ,
@@ -2298,8 +2298,8 @@ LANGUAGE sql STABLE AS $$
     WITH
     start_snap AS (
         SELECT ts.*, s.captured_at
-        FROM telemetry.table_snapshots ts
-        JOIN telemetry.snapshots s ON s.id = ts.snapshot_id
+        FROM flight_recorder.table_snapshots ts
+        JOIN flight_recorder.snapshots s ON s.id = ts.snapshot_id
         WHERE ts.schemaname = p_schema
           AND ts.relname = p_table
           AND s.captured_at <= p_start_time
@@ -2308,8 +2308,8 @@ LANGUAGE sql STABLE AS $$
     ),
     end_snap AS (
         SELECT ts.*, s.captured_at
-        FROM telemetry.table_snapshots ts
-        JOIN telemetry.snapshots s ON s.id = ts.snapshot_id
+        FROM flight_recorder.table_snapshots ts
+        JOIN flight_recorder.snapshots s ON s.id = ts.snapshot_id
         WHERE ts.schemaname = p_schema
           AND ts.relname = p_table
           AND s.captured_at >= p_end_time
@@ -2322,10 +2322,10 @@ LANGUAGE sql STABLE AS $$
         e.captured_at,
         EXTRACT(EPOCH FROM (e.captured_at - s.captured_at))::numeric,
 
-        telemetry._pretty_bytes(s.pg_relation_size),
-        telemetry._pretty_bytes(e.pg_relation_size),
-        telemetry._pretty_bytes(e.pg_relation_size - s.pg_relation_size),
-        telemetry._pretty_bytes(e.pg_total_relation_size - s.pg_total_relation_size),
+        flight_recorder._pretty_bytes(s.pg_relation_size),
+        flight_recorder._pretty_bytes(e.pg_relation_size),
+        flight_recorder._pretty_bytes(e.pg_relation_size - s.pg_relation_size),
+        flight_recorder._pretty_bytes(e.pg_total_relation_size - s.pg_total_relation_size),
 
         s.n_live_tup,
         e.n_live_tup,
@@ -2345,10 +2345,10 @@ LANGUAGE sql STABLE AS $$
 $$;
 
 -- -----------------------------------------------------------------------------
--- telemetry.statement_compare() - Compare query stats between two time points
+-- flight_recorder.statement_compare() - Compare query stats between two time points
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry.statement_compare(
+CREATE OR REPLACE FUNCTION flight_recorder.statement_compare(
     p_start_time TIMESTAMPTZ,
     p_end_time TIMESTAMPTZ,
     p_min_delta_ms DOUBLE PRECISION DEFAULT 100,
@@ -2387,16 +2387,16 @@ LANGUAGE sql STABLE AS $$
     WITH
     start_snap AS (
         SELECT ss.*, s.captured_at
-        FROM telemetry.statement_snapshots ss
-        JOIN telemetry.snapshots s ON s.id = ss.snapshot_id
+        FROM flight_recorder.statement_snapshots ss
+        JOIN flight_recorder.snapshots s ON s.id = ss.snapshot_id
         WHERE s.captured_at <= p_start_time
         ORDER BY s.captured_at DESC
         LIMIT 1000
     ),
     end_snap AS (
         SELECT ss.*, s.captured_at
-        FROM telemetry.statement_snapshots ss
-        JOIN telemetry.snapshots s ON s.id = ss.snapshot_id
+        FROM flight_recorder.statement_snapshots ss
+        JOIN flight_recorder.snapshots s ON s.id = ss.snapshot_id
         WHERE s.captured_at >= p_end_time
         ORDER BY s.captured_at ASC
         LIMIT 1000
@@ -2489,10 +2489,10 @@ LANGUAGE sql STABLE AS $$
 $$;
 
 -- -----------------------------------------------------------------------------
--- telemetry.activity_at() - Show what was happening at a specific moment
+-- flight_recorder.activity_at() - Show what was happening at a specific moment
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry.activity_at(p_timestamp TIMESTAMPTZ)
+CREATE OR REPLACE FUNCTION flight_recorder.activity_at(p_timestamp TIMESTAMPTZ)
 RETURNS TABLE(
     sample_captured_at      TIMESTAMPTZ,
     sample_offset_seconds   NUMERIC,
@@ -2526,7 +2526,7 @@ LANGUAGE sql STABLE AS $$
     nearest_sample AS (
         SELECT id, captured_at,
                ABS(EXTRACT(EPOCH FROM (captured_at - p_timestamp))) AS offset_secs
-        FROM telemetry.samples
+        FROM flight_recorder.samples
         ORDER BY ABS(EXTRACT(EPOCH FROM (captured_at - p_timestamp)))
         LIMIT 1
     ),
@@ -2534,9 +2534,9 @@ LANGUAGE sql STABLE AS $$
         SELECT s.id, s.captured_at, s.autovacuum_workers,
                (s.checkpoint_time IS DISTINCT FROM prev.checkpoint_time) AS checkpoint_occurred,
                ABS(EXTRACT(EPOCH FROM (s.captured_at - p_timestamp))) AS offset_secs
-        FROM telemetry.snapshots s
-        LEFT JOIN telemetry.snapshots prev ON prev.id = (
-            SELECT MAX(id) FROM telemetry.snapshots WHERE id < s.id
+        FROM flight_recorder.snapshots s
+        LEFT JOIN flight_recorder.snapshots prev ON prev.id = (
+            SELECT MAX(id) FROM flight_recorder.snapshots WHERE id < s.id
         )
         ORDER BY ABS(EXTRACT(EPOCH FROM (s.captured_at - p_timestamp)))
         LIMIT 1
@@ -2545,7 +2545,7 @@ LANGUAGE sql STABLE AS $$
         SELECT
             wait_event_type || ':' || wait_event AS wait_event,
             count
-        FROM telemetry.wait_samples w
+        FROM flight_recorder.wait_samples w
         JOIN nearest_sample ns ON ns.id = w.sample_id
         WHERE w.state NOT IN ('idle', 'idle in transaction')
         ORDER BY count DESC
@@ -2561,14 +2561,14 @@ LANGUAGE sql STABLE AS $$
             count(*) FILTER (WHERE state = 'active') AS active_sessions,
             count(*) FILTER (WHERE wait_event IS NOT NULL) AS waiting_sessions,
             count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_transaction
-        FROM telemetry.activity_samples a
+        FROM flight_recorder.activity_samples a
         JOIN nearest_sample ns ON ns.id = a.sample_id
     ),
     sample_locks AS (
         SELECT
             count(DISTINCT blocked_pid) AS blocked_pids,
             max(blocked_duration) AS longest_blocked
-        FROM telemetry.lock_samples l
+        FROM flight_recorder.lock_samples l
         JOIN nearest_sample ns ON ns.id = l.sample_id
     ),
     sample_progress AS (
@@ -2577,7 +2577,7 @@ LANGUAGE sql STABLE AS $$
             count(*) FILTER (WHERE progress_type = 'copy') AS copies,
             count(*) FILTER (WHERE progress_type = 'create_index') AS indexes,
             count(*) FILTER (WHERE progress_type = 'analyze') AS analyzes
-        FROM telemetry.progress_samples p
+        FROM flight_recorder.progress_samples p
         JOIN nearest_sample ns ON ns.id = p.sample_id
     )
     SELECT
@@ -2616,10 +2616,10 @@ LANGUAGE sql STABLE AS $$
 $$;
 
 -- -----------------------------------------------------------------------------
--- telemetry.anomaly_report() - Flag unusual patterns in a time window
+-- flight_recorder.anomaly_report() - Flag unusual patterns in a time window
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry.anomaly_report(
+CREATE OR REPLACE FUNCTION flight_recorder.anomaly_report(
     p_start_time TIMESTAMPTZ,
     p_end_time TIMESTAMPTZ
 )
@@ -2639,7 +2639,7 @@ DECLARE
     v_max_block_duration INTERVAL;
 BEGIN
     -- Get comparison data
-    SELECT * INTO v_cmp FROM telemetry.compare(p_start_time, p_end_time);
+    SELECT * INTO v_cmp FROM flight_recorder.compare(p_start_time, p_end_time);
 
     -- Check 1: Checkpoint occurred during window
     IF v_cmp.checkpoint_occurred THEN
@@ -2714,8 +2714,8 @@ BEGIN
     -- Check 6: Lock contention
     SELECT count(DISTINCT blocked_pid), max(blocked_duration)
     INTO v_lock_count, v_max_block_duration
-    FROM telemetry.lock_samples l
-    JOIN telemetry.samples s ON s.id = l.sample_id
+    FROM flight_recorder.lock_samples l
+    JOIN flight_recorder.samples s ON s.id = l.sample_id
     WHERE s.captured_at BETWEEN p_start_time AND p_end_time;
 
     IF v_lock_count > 0 THEN
@@ -2738,10 +2738,10 @@ END;
 $$;
 
 -- -----------------------------------------------------------------------------
--- telemetry.summary_report() - Comprehensive diagnostic summary
+-- flight_recorder.summary_report() - Comprehensive diagnostic summary
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry.summary_report(
+CREATE OR REPLACE FUNCTION flight_recorder.summary_report(
     p_start_time TIMESTAMPTZ,
     p_end_time TIMESTAMPTZ
 )
@@ -2760,13 +2760,13 @@ DECLARE
     v_lock_summary RECORD;
 BEGIN
     -- Get comparison data
-    SELECT * INTO v_cmp FROM telemetry.compare(p_start_time, p_end_time);
+    SELECT * INTO v_cmp FROM flight_recorder.compare(p_start_time, p_end_time);
 
     SELECT count(*) INTO v_sample_count
-    FROM telemetry.samples WHERE captured_at BETWEEN p_start_time AND p_end_time;
+    FROM flight_recorder.samples WHERE captured_at BETWEEN p_start_time AND p_end_time;
 
     SELECT count(*) INTO v_anomaly_count
-    FROM telemetry.anomaly_report(p_start_time, p_end_time);
+    FROM flight_recorder.anomaly_report(p_start_time, p_end_time);
 
     -- === OVERVIEW SECTION ===
     section := 'OVERVIEW';
@@ -2778,7 +2778,7 @@ BEGIN
 
     metric := 'Data Coverage';
     value := format('%s snapshots, %s samples',
-                   (SELECT count(*) FROM telemetry.snapshots
+                   (SELECT count(*) FROM flight_recorder.snapshots
                     WHERE captured_at BETWEEN p_start_time AND p_end_time),
                    v_sample_count);
     interpretation := CASE
@@ -2843,7 +2843,7 @@ BEGIN
 
     FOR v_top_wait IN
         SELECT wait_event_type || ':' || wait_event AS we, total_waiters, pct_of_samples
-        FROM telemetry.wait_summary(p_start_time, p_end_time)
+        FROM flight_recorder.wait_summary(p_start_time, p_end_time)
         LIMIT 5
     LOOP
         metric := v_top_wait.we;
@@ -2867,8 +2867,8 @@ BEGIN
         count(DISTINCT blocked_pid) AS blocked_count,
         max(blocked_duration) AS max_duration
     INTO v_lock_summary
-    FROM telemetry.lock_samples l
-    JOIN telemetry.samples s ON s.id = l.sample_id
+    FROM flight_recorder.lock_samples l
+    JOIN flight_recorder.samples s ON s.id = l.sample_id
     WHERE s.captured_at BETWEEN p_start_time AND p_end_time;
 
     metric := 'Blocked Sessions';
@@ -2884,10 +2884,10 @@ END;
 $$;
 
 -- -----------------------------------------------------------------------------
--- telemetry.set_mode() - Configure telemetry collection mode
+-- flight_recorder.set_mode() - Configure flight recorder collection mode
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry.set_mode(p_mode TEXT)
+CREATE OR REPLACE FUNCTION flight_recorder.set_mode(p_mode TEXT)
 RETURNS TEXT
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -2923,15 +2923,15 @@ BEGIN
     END CASE;
 
     -- Update configuration
-    INSERT INTO telemetry.config (key, value, updated_at)
+    INSERT INTO flight_recorder.config (key, value, updated_at)
     VALUES ('mode', p_mode, now())
     ON CONFLICT (key) DO UPDATE SET value = p_mode, updated_at = now();
 
-    INSERT INTO telemetry.config (key, value, updated_at)
+    INSERT INTO flight_recorder.config (key, value, updated_at)
     VALUES ('enable_locks', v_enable_locks::text, now())
     ON CONFLICT (key) DO UPDATE SET value = v_enable_locks::text, updated_at = now();
 
-    INSERT INTO telemetry.config (key, value, updated_at)
+    INSERT INTO flight_recorder.config (key, value, updated_at)
     VALUES ('enable_progress', v_enable_progress::text, now())
     ON CONFLICT (key) DO UPDATE SET value = v_enable_progress::text, updated_at = now();
 
@@ -2951,16 +2951,16 @@ BEGIN
             );
 
             -- Unschedule existing
-            PERFORM cron.unschedule('telemetry_sample');
+            PERFORM cron.unschedule('flight_recorder_sample');
 
             IF v_supports_subsecond THEN
-                PERFORM cron.schedule('telemetry_sample', v_interval, 'SELECT telemetry.sample()');
+                PERFORM cron.schedule('flight_recorder_sample', v_interval, 'SELECT flight_recorder.sample()');
             ELSE
                 -- Fallback: minute-level schedules
                 IF p_mode = 'emergency' THEN
-                    PERFORM cron.schedule('telemetry_sample', '*/2 * * * *', 'SELECT telemetry.sample()');
+                    PERFORM cron.schedule('flight_recorder_sample', '*/2 * * * *', 'SELECT flight_recorder.sample()');
                 ELSE
-                    PERFORM cron.schedule('telemetry_sample', '* * * * *', 'SELECT telemetry.sample()');
+                    PERFORM cron.schedule('flight_recorder_sample', '* * * * *', 'SELECT flight_recorder.sample()');
                 END IF;
             END IF;
         END IF;
@@ -2974,10 +2974,10 @@ END;
 $$;
 
 -- -----------------------------------------------------------------------------
--- telemetry.get_mode() - Show current telemetry configuration
+-- flight_recorder.get_mode() - Show current telemetry configuration
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry.get_mode()
+CREATE OR REPLACE FUNCTION flight_recorder.get_mode()
 RETURNS TABLE(
     mode                TEXT,
     sample_interval     TEXT,
@@ -2987,23 +2987,23 @@ RETURNS TABLE(
 )
 LANGUAGE sql STABLE AS $$
     SELECT
-        telemetry._get_config('mode', 'normal') AS mode,
-        CASE telemetry._get_config('mode', 'normal')
+        flight_recorder._get_config('mode', 'normal') AS mode,
+        CASE flight_recorder._get_config('mode', 'normal')
             WHEN 'normal' THEN '30 seconds'
             WHEN 'light' THEN '60 seconds'
             WHEN 'emergency' THEN '120 seconds'
             ELSE 'unknown'
         END AS sample_interval,
-        COALESCE(telemetry._get_config('enable_locks', 'true')::boolean, true) AS locks_enabled,
-        COALESCE(telemetry._get_config('enable_progress', 'true')::boolean, true) AS progress_enabled,
-        telemetry._get_config('statements_enabled', 'auto') AS statements_enabled
+        COALESCE(flight_recorder._get_config('enable_locks', 'true')::boolean, true) AS locks_enabled,
+        COALESCE(flight_recorder._get_config('enable_progress', 'true')::boolean, true) AS progress_enabled,
+        flight_recorder._get_config('statements_enabled', 'auto') AS statements_enabled
 $$;
 
 -- -----------------------------------------------------------------------------
--- telemetry.cleanup() - Remove old telemetry data
+-- flight_recorder.cleanup() - Remove old flight recorder data
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry.cleanup(p_retain_interval INTERVAL DEFAULT NULL)
+CREATE OR REPLACE FUNCTION flight_recorder.cleanup(p_retain_interval INTERVAL DEFAULT NULL)
 RETURNS TABLE(
     deleted_snapshots   BIGINT,
     deleted_samples     BIGINT,
@@ -3038,19 +3038,19 @@ BEGIN
     ELSE
         -- P2: Use configurable retention per table type
         v_samples_retention_days := COALESCE(
-            telemetry._get_config('retention_samples_days', '7')::integer,
+            flight_recorder._get_config('retention_samples_days', '7')::integer,
             7
         );
         v_snapshots_retention_days := COALESCE(
-            telemetry._get_config('retention_snapshots_days', '30')::integer,
+            flight_recorder._get_config('retention_snapshots_days', '30')::integer,
             30
         );
         v_statements_retention_days := COALESCE(
-            telemetry._get_config('retention_statements_days', '30')::integer,
+            flight_recorder._get_config('retention_statements_days', '30')::integer,
             30
         );
         v_stats_retention_days := COALESCE(
-            telemetry._get_config('retention_collection_stats_days', '30')::integer,
+            flight_recorder._get_config('retention_collection_stats_days', '30')::integer,
             30
         );
 
@@ -3062,22 +3062,22 @@ BEGIN
 
     -- Delete old samples (cascades to wait_samples, activity_samples, progress_samples, lock_samples)
     WITH deleted AS (
-        DELETE FROM telemetry.samples WHERE captured_at < v_samples_cutoff RETURNING 1
+        DELETE FROM flight_recorder.samples WHERE captured_at < v_samples_cutoff RETURNING 1
     )
     SELECT count(*) INTO v_deleted_samples FROM deleted;
 
     -- Delete old snapshots (cascades to table_snapshots, replication_snapshots)
     WITH deleted AS (
-        DELETE FROM telemetry.snapshots WHERE captured_at < v_snapshots_cutoff RETURNING 1
+        DELETE FROM flight_recorder.snapshots WHERE captured_at < v_snapshots_cutoff RETURNING 1
     )
     SELECT count(*) INTO v_deleted_snapshots FROM deleted;
 
     -- P2: Delete old pg_stat_statements snapshots with configurable retention
     -- statement_snapshots references snapshots(id), so delete based on snapshot's captured_at
     WITH deleted AS (
-        DELETE FROM telemetry.statement_snapshots
+        DELETE FROM flight_recorder.statement_snapshots
         WHERE snapshot_id IN (
-            SELECT id FROM telemetry.snapshots WHERE captured_at < v_statements_cutoff
+            SELECT id FROM flight_recorder.snapshots WHERE captured_at < v_statements_cutoff
         )
         RETURNING 1
     )
@@ -3085,17 +3085,17 @@ BEGIN
 
     -- P2: Delete old collection_stats with configurable retention
     WITH deleted AS (
-        DELETE FROM telemetry.collection_stats WHERE started_at < v_stats_cutoff RETURNING 1
+        DELETE FROM flight_recorder.collection_stats WHERE started_at < v_stats_cutoff RETURNING 1
     )
     SELECT count(*) INTO v_deleted_stats FROM deleted;
 
     -- P1 Safety: VACUUM ANALYZE after cleanup to reclaim space and update stats
-    -- This prevents bloat in telemetry tables and keeps query planner informed
+    -- This prevents bloat in flight recorder tables and keeps query planner informed
     FOR v_table_name IN
         SELECT c.relname
         FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'telemetry'
+        WHERE n.nspname = 'flight_recorder'
           AND c.relkind = 'r'  -- regular tables only
           AND c.relname IN (
               'samples', 'wait_samples', 'activity_samples', 'progress_samples', 'lock_samples',
@@ -3105,10 +3105,10 @@ BEGIN
         ORDER BY c.relname
     LOOP
         BEGIN
-            EXECUTE format('VACUUM ANALYZE telemetry.%I', v_table_name);
+            EXECUTE format('VACUUM ANALYZE flight_recorder.%I', v_table_name);
             v_vacuumed_count := v_vacuumed_count + 1;
         EXCEPTION WHEN OTHERS THEN
-            RAISE WARNING 'pg-telemetry: Failed to VACUUM table %: %', v_table_name, SQLERRM;
+            RAISE WARNING 'pg-flight-recorder: Failed to VACUUM table %: %', v_table_name, SQLERRM;
         END;
     END LOOP;
 
@@ -3121,7 +3121,7 @@ $$;
 -- -----------------------------------------------------------------------------
 
 -- Create future partitions for samples table (daily partitions)
-CREATE OR REPLACE FUNCTION telemetry.create_partitions(p_days_ahead INTEGER DEFAULT 3)
+CREATE OR REPLACE FUNCTION flight_recorder.create_partitions(p_days_ahead INTEGER DEFAULT 3)
 RETURNS TEXT
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -3140,10 +3140,10 @@ BEGIN
         -- Check if partition exists
         IF NOT EXISTS (
             SELECT 1 FROM pg_tables
-            WHERE schemaname = 'telemetry' AND tablename = v_partition_name
+            WHERE schemaname = 'flight_recorder' AND tablename = v_partition_name
         ) THEN
             EXECUTE format(
-                'CREATE TABLE telemetry.%I PARTITION OF telemetry.samples FOR VALUES FROM (%L) TO (%L)',
+                'CREATE TABLE flight_recorder.%I PARTITION OF flight_recorder.samples FOR VALUES FROM (%L) TO (%L)',
                 v_partition_name, v_start_date, v_end_date
             );
             v_created := v_created + 1;
@@ -3155,7 +3155,7 @@ END;
 $$;
 
 -- Drop old partitions (more efficient than DELETE for partitioned tables)
-CREATE OR REPLACE FUNCTION telemetry.drop_old_partitions(p_retention_days INTEGER DEFAULT NULL)
+CREATE OR REPLACE FUNCTION flight_recorder.drop_old_partitions(p_retention_days INTEGER DEFAULT NULL)
 RETURNS TEXT
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -3168,7 +3168,7 @@ BEGIN
     -- Get retention from config
     v_retention_days := COALESCE(
         p_retention_days,
-        telemetry._get_config('retention_samples_days', '7')::integer,
+        flight_recorder._get_config('retention_samples_days', '7')::integer,
         7
     );
 
@@ -3178,7 +3178,7 @@ BEGIN
     FOR v_partition_name IN
         SELECT tablename
         FROM pg_tables
-        WHERE schemaname = 'telemetry'
+        WHERE schemaname = 'flight_recorder'
           AND tablename LIKE 'samples_%'
           AND tablename ~ 'samples_\d{8}$'
         ORDER BY tablename
@@ -3188,7 +3188,7 @@ BEGIN
             v_partition_date := TO_DATE(substring(v_partition_name from 9), 'YYYYMMDD');
 
             IF v_partition_date < v_cutoff_date THEN
-                EXECUTE format('DROP TABLE IF EXISTS telemetry.%I', v_partition_name);
+                EXECUTE format('DROP TABLE IF EXISTS flight_recorder.%I', v_partition_name);
                 v_dropped := v_dropped + 1;
                 RAISE NOTICE 'Dropped old partition: %', v_partition_name;
             END IF;
@@ -3202,7 +3202,7 @@ END;
 $$;
 
 -- List all partitions with sizes
-CREATE OR REPLACE FUNCTION telemetry.list_partitions()
+CREATE OR REPLACE FUNCTION flight_recorder.list_partitions()
 RETURNS TABLE(
     partition_name TEXT,
     partition_date DATE,
@@ -3215,12 +3215,12 @@ BEGIN
     SELECT
         t.tablename::TEXT,
         TO_DATE(substring(t.tablename from 9), 'YYYYMMDD'),
-        pg_size_pretty(pg_total_relation_size('telemetry.' || t.tablename)),
+        pg_size_pretty(pg_total_relation_size('flight_recorder.' || t.tablename)),
         (SELECT count(*) FROM pg_class c
          JOIN pg_namespace n ON n.oid = c.relnamespace
-         WHERE n.nspname = 'telemetry' AND c.relname = t.tablename)::BIGINT
+         WHERE n.nspname = 'flight_recorder' AND c.relname = t.tablename)::BIGINT
     FROM pg_tables t
-    WHERE t.schemaname = 'telemetry'
+    WHERE t.schemaname = 'flight_recorder'
       AND t.tablename LIKE 'samples_%'
       AND t.tablename ~ 'samples_\d{8}$'
     ORDER BY t.tablename;
@@ -3228,40 +3228,40 @@ END;
 $$;
 
 -- -----------------------------------------------------------------------------
--- telemetry.disable() - Emergency kill switch: stop all collection
+-- flight_recorder.disable() - Emergency kill switch: stop all collection
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry.disable()
+CREATE OR REPLACE FUNCTION flight_recorder.disable()
 RETURNS TEXT
 LANGUAGE plpgsql AS $$
 DECLARE
     v_unscheduled INTEGER := 0;
 BEGIN
-    -- Unschedule all telemetry jobs
+    -- Unschedule all flight recorder jobs
     BEGIN
-        PERFORM cron.unschedule('telemetry_snapshot')
-        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_snapshot');
+        PERFORM cron.unschedule('flight_recorder_snapshot')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'flight_recorder_snapshot');
         IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
 
-        PERFORM cron.unschedule('telemetry_sample')
-        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_sample');
+        PERFORM cron.unschedule('flight_recorder_sample')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'flight_recorder_sample');
         IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
 
-        PERFORM cron.unschedule('telemetry_cleanup')
-        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_cleanup');
+        PERFORM cron.unschedule('flight_recorder_cleanup')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'flight_recorder_cleanup');
         IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
 
         -- A-GRADE: Unschedule partition creation
-        PERFORM cron.unschedule('telemetry_partition')
-        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_partition');
+        PERFORM cron.unschedule('flight_recorder_partition')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'flight_recorder_partition');
         IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
 
         -- Mark as disabled in config
-        INSERT INTO telemetry.config (key, value, updated_at)
+        INSERT INTO flight_recorder.config (key, value, updated_at)
         VALUES ('enabled', 'false', now())
         ON CONFLICT (key) DO UPDATE SET value = 'false', updated_at = now();
 
-        RETURN format('Telemetry collection stopped. Unscheduled %s cron jobs. Use telemetry.enable() to restart.', v_unscheduled);
+        RETURN format('Flight Recorder collection stopped. Unscheduled %s cron jobs. Use flight_recorder.enable() to restart.', v_unscheduled);
     EXCEPTION
         WHEN undefined_table THEN
             RETURN 'pg_cron extension not found. No jobs to unschedule.';
@@ -3272,10 +3272,10 @@ END;
 $$;
 
 -- -----------------------------------------------------------------------------
--- telemetry.enable() - Restart collection after kill switch
+-- flight_recorder.enable() - Restart collection after kill switch
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry.enable()
+CREATE OR REPLACE FUNCTION flight_recorder.enable()
 RETURNS TEXT
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -3286,7 +3286,7 @@ DECLARE
     v_scheduled INTEGER := 0;
 BEGIN
     -- Get current mode
-    v_mode := telemetry._get_config('mode', 'normal');
+    v_mode := flight_recorder._get_config('mode', 'normal');
 
     BEGIN
         -- Check pg_cron version
@@ -3307,37 +3307,37 @@ BEGIN
         );
 
         -- Schedule snapshot (every 5 minutes)
-        PERFORM cron.schedule('telemetry_snapshot', '*/5 * * * *', 'SELECT telemetry.snapshot()');
+        PERFORM cron.schedule('flight_recorder_snapshot', '*/5 * * * *', 'SELECT flight_recorder.snapshot()');
         v_scheduled := v_scheduled + 1;
 
         -- Schedule sample based on mode and pg_cron capabilities (A-GRADE: INCREASED from 30s to 60s)
         IF v_mode = 'normal' AND v_supports_subsecond THEN
-            PERFORM cron.schedule('telemetry_sample', '60 seconds', 'SELECT telemetry.sample()');
+            PERFORM cron.schedule('flight_recorder_sample', '60 seconds', 'SELECT flight_recorder.sample()');
             v_sample_schedule := '60 seconds (A-GRADE safety)';
         ELSIF v_mode = 'light' OR (v_mode = 'normal' AND NOT v_supports_subsecond) THEN
-            PERFORM cron.schedule('telemetry_sample', '* * * * *', 'SELECT telemetry.sample()');
+            PERFORM cron.schedule('flight_recorder_sample', '* * * * *', 'SELECT flight_recorder.sample()');
             v_sample_schedule := '* * * * * (every minute)';
         ELSIF v_mode = 'emergency' THEN
-            PERFORM cron.schedule('telemetry_sample', '*/2 * * * *', 'SELECT telemetry.sample()');
+            PERFORM cron.schedule('flight_recorder_sample', '*/2 * * * *', 'SELECT flight_recorder.sample()');
             v_sample_schedule := '*/2 * * * * (every 2 minutes)';
         END IF;
         v_scheduled := v_scheduled + 1;
 
         -- Schedule cleanup (daily at 3 AM) - now uses drop_old_partitions for samples table
-        PERFORM cron.schedule('telemetry_cleanup', '0 3 * * *',
-            'SELECT telemetry.drop_old_partitions(); SELECT * FROM telemetry.cleanup(''7 days''::interval);');
+        PERFORM cron.schedule('flight_recorder_cleanup', '0 3 * * *',
+            'SELECT flight_recorder.drop_old_partitions(); SELECT * FROM flight_recorder.cleanup(''7 days''::interval);');
         v_scheduled := v_scheduled + 1;
 
         -- A-GRADE: Schedule partition creation (daily at 2 AM) - create future partitions proactively
-        PERFORM cron.schedule('telemetry_partition', '0 2 * * *', 'SELECT telemetry.create_partitions(3)');
+        PERFORM cron.schedule('flight_recorder_partition', '0 2 * * *', 'SELECT flight_recorder.create_partitions(3)');
         v_scheduled := v_scheduled + 1;
 
         -- Mark as enabled in config
-        INSERT INTO telemetry.config (key, value, updated_at)
+        INSERT INTO flight_recorder.config (key, value, updated_at)
         VALUES ('enabled', 'true', now())
         ON CONFLICT (key) DO UPDATE SET value = 'true', updated_at = now();
 
-        RETURN format('Telemetry collection restarted. Scheduled %s cron jobs in %s mode (sample: %s).',
+        RETURN format('Flight Recorder collection restarted. Scheduled %s cron jobs in %s mode (sample: %s).',
                      v_scheduled, v_mode, v_sample_schedule);
     EXCEPTION
         WHEN undefined_table THEN
@@ -3364,14 +3364,14 @@ DECLARE
 BEGIN
     -- Remove existing jobs if any
     BEGIN
-        PERFORM cron.unschedule('telemetry_snapshot')
-        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_snapshot');
-        PERFORM cron.unschedule('telemetry_sample')
-        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_sample');
-        PERFORM cron.unschedule('telemetry_cleanup')
-        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_cleanup');
-        PERFORM cron.unschedule('telemetry_partition')
-        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_partition');
+        PERFORM cron.unschedule('flight_recorder_snapshot')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'flight_recorder_snapshot');
+        PERFORM cron.unschedule('flight_recorder_sample')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'flight_recorder_sample');
+        PERFORM cron.unschedule('flight_recorder_cleanup')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'flight_recorder_cleanup');
+        PERFORM cron.unschedule('flight_recorder_partition')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'flight_recorder_partition');
     EXCEPTION
         WHEN undefined_table THEN NULL;
         WHEN undefined_function THEN NULL;
@@ -3398,42 +3398,42 @@ BEGIN
 
     -- Schedule snapshot collection (every 5 minutes) - works on all pg_cron versions
     PERFORM cron.schedule(
-        'telemetry_snapshot',
+        'flight_recorder_snapshot',
         '*/5 * * * *',
-        'SELECT telemetry.snapshot()'
+        'SELECT flight_recorder.snapshot()'
     );
 
     -- Schedule sample collection based on pg_cron capabilities
     IF v_supports_subsecond THEN
         v_sample_schedule := '30 seconds';
         PERFORM cron.schedule(
-            'telemetry_sample',
+            'flight_recorder_sample',
             '30 seconds',
-            'SELECT telemetry.sample()'
+            'SELECT flight_recorder.sample()'
         );
         RAISE NOTICE 'pg_cron % supports sub-minute scheduling. Sampling every 30 seconds.', v_pgcron_version;
     ELSE
         v_sample_schedule := '* * * * * (every minute)';
         PERFORM cron.schedule(
-            'telemetry_sample',
+            'flight_recorder_sample',
             '* * * * *',
-            'SELECT telemetry.sample()'
+            'SELECT flight_recorder.sample()'
         );
         RAISE NOTICE 'pg_cron % does not support sub-minute scheduling (requires 1.4.1+). Sampling every minute instead.', v_pgcron_version;
     END IF;
 
     -- Schedule cleanup (daily at 3 AM, retain 7 days)
     PERFORM cron.schedule(
-        'telemetry_cleanup',
+        'flight_recorder_cleanup',
         '0 3 * * *',
-        'SELECT * FROM telemetry.cleanup(''7 days''::interval)'
+        'SELECT * FROM flight_recorder.cleanup(''7 days''::interval)'
     );
 
 EXCEPTION
     WHEN undefined_table THEN
-        RAISE NOTICE 'pg_cron extension not found. Automatic scheduling disabled. Run telemetry.snapshot() and telemetry.sample() manually or via external scheduler.';
+        RAISE NOTICE 'pg_cron extension not found. Automatic scheduling disabled. Run flight_recorder.snapshot() and flight_recorder.sample() manually or via external scheduler.';
     WHEN undefined_function THEN
-        RAISE NOTICE 'pg_cron extension not found. Automatic scheduling disabled. Run telemetry.snapshot() and telemetry.sample() manually or via external scheduler.';
+        RAISE NOTICE 'pg_cron extension not found. Automatic scheduling disabled. Run flight_recorder.snapshot() and flight_recorder.sample() manually or via external scheduler.';
 END;
 $$;
 
@@ -3448,7 +3448,7 @@ $$;
 -- -----------------------------------------------------------------------------
 
 -- P2: Create next time-based partition for samples or snapshots
-CREATE OR REPLACE FUNCTION telemetry.create_next_partition(
+CREATE OR REPLACE FUNCTION flight_recorder.create_next_partition(
     p_table_name TEXT,  -- 'samples' or 'snapshots'
     p_partition_interval TEXT DEFAULT 'day'  -- 'day' or 'week'
 )
@@ -3476,16 +3476,16 @@ BEGIN
     IF p_partition_interval = 'day' THEN
         v_from_date := v_next_date;
         v_to_date := v_next_date + interval '1 day';
-        v_partition_name := format('telemetry.%s_%s', p_table_name, to_char(v_from_date, 'YYYYMMDD'));
+        v_partition_name := format('flight_recorder.%s_%s', p_table_name, to_char(v_from_date, 'YYYYMMDD'));
     ELSE  -- week
         v_from_date := date_trunc('week', v_next_date + interval '1 week')::date;
         v_to_date := v_from_date + interval '1 week';
-        v_partition_name := format('telemetry.%s_%s', p_table_name, to_char(v_from_date, 'YYYYMMDD'));
+        v_partition_name := format('flight_recorder.%s_%s', p_table_name, to_char(v_from_date, 'YYYYMMDD'));
     END IF;
 
     -- Create partition
     EXECUTE format(
-        'CREATE TABLE IF NOT EXISTS %s PARTITION OF telemetry.%I FOR VALUES FROM (%L) TO (%L)',
+        'CREATE TABLE IF NOT EXISTS %s PARTITION OF flight_recorder.%I FOR VALUES FROM (%L) TO (%L)',
         v_partition_name, p_table_name, v_from_date, v_to_date
     );
 
@@ -3494,7 +3494,7 @@ END;
 $$;
 
 -- P2: Drop old partitions (faster than DELETE for cleanup)
-CREATE OR REPLACE FUNCTION telemetry.drop_old_partitions(
+CREATE OR REPLACE FUNCTION flight_recorder.drop_old_partitions(
     p_table_name TEXT,  -- 'samples' or 'snapshots'
     p_retain_interval INTERVAL DEFAULT '7 days'
 )
@@ -3524,7 +3524,7 @@ BEGIN
         JOIN pg_namespace n ON n.oid = c.relnamespace
         JOIN pg_inherits i ON i.inhrelid = c.oid
         JOIN pg_class p ON p.oid = i.inhparent
-        WHERE n.nspname = 'telemetry'
+        WHERE n.nspname = 'flight_recorder'
           AND p.relname = p_table_name
           AND c.relkind = 'r'
     LOOP
@@ -3536,7 +3536,7 @@ BEGIN
             );
 
             IF v_partition_date < v_cutoff_date THEN
-                EXECUTE format('DROP TABLE IF EXISTS telemetry.%I', v_partition_record.relname);
+                EXECUTE format('DROP TABLE IF EXISTS flight_recorder.%I', v_partition_record.relname);
                 RETURN QUERY SELECT v_partition_record.relname::text, true;
             END IF;
         EXCEPTION WHEN OTHERS THEN
@@ -3548,7 +3548,7 @@ END;
 $$;
 
 -- P2: Check partition status and provide recommendations
-CREATE OR REPLACE FUNCTION telemetry.partition_status()
+CREATE OR REPLACE FUNCTION flight_recorder.partition_status()
 RETURNS TABLE(
     table_name TEXT,
     is_partitioned BOOLEAN,
@@ -3569,7 +3569,7 @@ BEGIN
         JOIN pg_namespace n ON n.oid = c.relnamespace
         JOIN pg_inherits i ON i.inhrelid = c.oid
         JOIN pg_class p ON p.oid = i.inhparent
-        WHERE n.nspname = 'telemetry'
+        WHERE n.nspname = 'flight_recorder'
           AND p.relname IN ('samples', 'snapshots')
           AND c.relkind = 'r'
     )
@@ -3579,7 +3579,7 @@ BEGIN
             SELECT 1 FROM pg_partitioned_table pt
             JOIN pg_class c ON c.oid = pt.partrelid
             JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname = 'telemetry' AND c.relname = t.table_name
+            WHERE n.nspname = 'flight_recorder' AND c.relname = t.table_name
         )) as is_partitioned,
         COALESCE(pi.cnt, 0)::integer as partition_count,
         pi.oldest::text,
@@ -3589,7 +3589,7 @@ BEGIN
                 SELECT 1 FROM pg_partitioned_table pt
                 JOIN pg_class c ON c.oid = pt.partrelid
                 JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = 'telemetry' AND c.relname = t.table_name
+                WHERE n.nspname = 'flight_recorder' AND c.relname = t.table_name
             )) THEN 'Table not partitioned. See documentation for migration procedure.'
             WHEN pi.cnt = 0 THEN 'No partitions found. Run create_next_partition().'
             WHEN pi.cnt < 2 THEN 'Low partition count. Consider running create_next_partition().'
@@ -3612,7 +3612,7 @@ $$;
 -- -----------------------------------------------------------------------------
 
 -- P3: System health check - quick operational status
-CREATE OR REPLACE FUNCTION telemetry.health_check()
+CREATE OR REPLACE FUNCTION flight_recorder.health_check()
 RETURNS TABLE(
     component TEXT,
     status TEXT,
@@ -3631,27 +3631,27 @@ DECLARE
     v_snapshot_count INTEGER;
 BEGIN
     -- Check if telemetry is enabled
-    v_enabled := telemetry._get_config('enabled', 'true');
+    v_enabled := flight_recorder._get_config('enabled', 'true');
     IF v_enabled = 'false' THEN
         RETURN QUERY SELECT
-            'Telemetry System'::text,
+            'Flight Recorder System'::text,
             'DISABLED'::text,
             'Collection is disabled'::text,
-            'Run telemetry.enable() to restart'::text;
+            'Run flight_recorder.enable() to restart'::text;
         RETURN;
     END IF;
 
     -- Component 1: Overall system status
     RETURN QUERY SELECT
-        'Telemetry System'::text,
+        'Flight Recorder System'::text,
         'ENABLED'::text,
-        format('Mode: %s', telemetry._get_config('mode', 'normal')),
+        format('Mode: %s', flight_recorder._get_config('mode', 'normal')),
         NULL::text;
 
     -- Component 2: Schema size
     SELECT s.schema_size_mb, s.critical_threshold_mb, s.status
     INTO v_schema_size_mb, v_schema_critical_mb, v_enabled
-    FROM telemetry._check_schema_size() s;
+    FROM flight_recorder._check_schema_size() s;
 
     RETURN QUERY SELECT
         'Schema Size'::text,
@@ -3669,7 +3669,7 @@ BEGIN
     -- Component 3: Circuit breaker status
     SELECT count(*)
     INTO v_recent_trips
-    FROM telemetry.collection_stats
+    FROM flight_recorder.collection_stats
     WHERE skipped = true
       AND started_at > now() - interval '1 hour'
       AND skipped_reason LIKE '%Circuit breaker%';
@@ -3688,8 +3688,8 @@ BEGIN
         END::text;
 
     -- Component 4: Collection freshness
-    SELECT max(captured_at) INTO v_last_sample FROM telemetry.samples;
-    SELECT max(captured_at) INTO v_last_snapshot FROM telemetry.snapshots;
+    SELECT max(captured_at) INTO v_last_sample FROM flight_recorder.samples;
+    SELECT max(captured_at) INTO v_last_snapshot FROM flight_recorder.snapshots;
 
     RETURN QUERY SELECT
         'Sample Collection'::text,
@@ -3728,8 +3728,8 @@ BEGIN
         END::text;
 
     -- Component 5: Data volume
-    SELECT count(*) INTO v_sample_count FROM telemetry.samples;
-    SELECT count(*) INTO v_snapshot_count FROM telemetry.snapshots;
+    SELECT count(*) INTO v_sample_count FROM flight_recorder.samples;
+    SELECT count(*) INTO v_snapshot_count FROM flight_recorder.snapshots;
 
     RETURN QUERY SELECT
         'Data Volume'::text,
@@ -3759,12 +3759,12 @@ BEGIN
             WHEN h.status = 'WARNING' THEN 'Monitor for increased churn'
             ELSE NULL
         END::text
-    FROM telemetry._check_statements_health() h;
+    FROM flight_recorder._check_statements_health() h;
 END;
 $$;
 
--- P3: Performance impact analysis - quantify telemetry overhead
-CREATE OR REPLACE FUNCTION telemetry.performance_report(p_lookback_interval INTERVAL DEFAULT '24 hours')
+-- P3: Performance impact analysis - quantify flight recorder overhead
+CREATE OR REPLACE FUNCTION flight_recorder.performance_report(p_lookback_interval INTERVAL DEFAULT '24 hours')
 RETURNS TABLE(
     metric TEXT,
     value TEXT,
@@ -3792,11 +3792,11 @@ BEGIN
         count(*) FILTER (WHERE skipped = true)
     INTO v_avg_sample_ms, v_max_sample_ms, v_avg_snapshot_ms, v_max_snapshot_ms,
          v_total_collections, v_failed_collections, v_skipped_collections
-    FROM telemetry.collection_stats
+    FROM flight_recorder.collection_stats
     WHERE started_at > now() - p_lookback_interval;
 
     -- Get current schema size
-    SELECT schema_size_mb INTO v_schema_size_mb FROM telemetry._check_schema_size();
+    SELECT schema_size_mb INTO v_schema_size_mb FROM flight_recorder._check_schema_size();
 
     -- Return metrics
     RETURN QUERY SELECT
@@ -3879,7 +3879,7 @@ BEGIN
             WHEN avg(sections_succeeded::numeric / NULLIF(sections_total, 0)) >= 0.75 THEN 'Fair - some section failures'
             ELSE 'Poor - frequent section failures'
         END::text
-    FROM telemetry.collection_stats
+    FROM flight_recorder.collection_stats
     WHERE started_at > now() - p_lookback_interval
       AND sections_total IS NOT NULL;
 
@@ -3887,7 +3887,7 @@ BEGIN
     RETURN QUERY
     WITH recent AS (
         SELECT duration_ms
-        FROM telemetry.collection_stats
+        FROM flight_recorder.collection_stats
         WHERE collection_type = 'sample'
           AND success = true
           AND skipped = false
@@ -3897,7 +3897,7 @@ BEGIN
     ),
     baseline AS (
         SELECT duration_ms
-        FROM telemetry.collection_stats
+        FROM flight_recorder.collection_stats
         WHERE collection_type = 'sample'
           AND success = true
           AND skipped = false
@@ -3933,7 +3933,7 @@ $$;
 -- -----------------------------------------------------------------------------
 
 -- P4: Check alert conditions and return notifications
-CREATE OR REPLACE FUNCTION telemetry.check_alerts(p_lookback_interval INTERVAL DEFAULT '1 hour')
+CREATE OR REPLACE FUNCTION flight_recorder.check_alerts(p_lookback_interval INTERVAL DEFAULT '1 hour')
 RETURNS TABLE(
     alert_type TEXT,
     severity TEXT,
@@ -3951,7 +3951,7 @@ DECLARE
 BEGIN
     -- Check if alerts are enabled
     v_enabled := COALESCE(
-        telemetry._get_config('alert_enabled', 'false')::boolean,
+        flight_recorder._get_config('alert_enabled', 'false')::boolean,
         false
     );
 
@@ -3961,12 +3961,12 @@ BEGIN
 
     -- Alert 1: Excessive circuit breaker trips
     v_cb_threshold := COALESCE(
-        telemetry._get_config('alert_circuit_breaker_count', '5')::integer,
+        flight_recorder._get_config('alert_circuit_breaker_count', '5')::integer,
         5
     );
 
     SELECT count(*) INTO v_cb_count
-    FROM telemetry.collection_stats
+    FROM flight_recorder.collection_stats
     WHERE skipped = true
       AND started_at > now() - p_lookback_interval
       AND skipped_reason LIKE '%Circuit breaker%';
@@ -3977,16 +3977,16 @@ BEGIN
             'CRITICAL'::text,
             format('Circuit breaker tripped %s times in last %s', v_cb_count, p_lookback_interval),
             now(),
-            'System under severe stress. Consider switching to emergency mode or disabling telemetry temporarily.'::text;
+            'System under severe stress. Consider switching to emergency mode or disabling flight recorder temporarily.'::text;
     END IF;
 
     -- Alert 2: Schema size approaching critical
     v_schema_threshold_mb := COALESCE(
-        telemetry._get_config('alert_schema_size_mb', '8000')::integer,
+        flight_recorder._get_config('alert_schema_size_mb', '8000')::integer,
         8000
     );
 
-    SELECT schema_size_mb INTO v_schema_size_mb FROM telemetry._check_schema_size();
+    SELECT schema_size_mb INTO v_schema_size_mb FROM flight_recorder._check_schema_size();
 
     IF v_schema_size_mb >= v_schema_threshold_mb THEN
         RETURN QUERY SELECT
@@ -3994,7 +3994,7 @@ BEGIN
             'WARNING'::text,
             format('Schema size is %s MB (threshold: %s MB)', round(v_schema_size_mb)::text, v_schema_threshold_mb),
             now(),
-            'Run telemetry.cleanup() to reclaim space.'::text;
+            'Run flight_recorder.cleanup() to reclaim space.'::text;
     END IF;
 
     -- Alert 3: Collection failures
@@ -4002,7 +4002,7 @@ BEGIN
         v_recent_failures INTEGER;
     BEGIN
         SELECT count(*) INTO v_recent_failures
-        FROM telemetry.collection_stats
+        FROM flight_recorder.collection_stats
         WHERE success = false
           AND started_at > now() - p_lookback_interval;
 
@@ -4020,7 +4020,7 @@ BEGIN
     DECLARE
         v_last_sample TIMESTAMPTZ;
     BEGIN
-        SELECT max(captured_at) INTO v_last_sample FROM telemetry.samples;
+        SELECT max(captured_at) INTO v_last_sample FROM flight_recorder.samples;
 
         IF v_last_sample IS NULL OR v_last_sample < now() - interval '15 minutes' THEN
             RETURN QUERY SELECT
@@ -4031,14 +4031,14 @@ BEGIN
                     ELSE format('Last sample was %s ago', age(now(), v_last_sample))
                 END,
                 now(),
-                'Check pg_cron jobs: SELECT * FROM cron.job WHERE jobname LIKE ''telemetry_%'''::text;
+                'Check pg_cron jobs: SELECT * FROM cron.job WHERE jobname LIKE ''flight_recorder_%'''::text;
         END IF;
     END;
 END;
 $$;
 
--- P4: Export telemetry data to JSON format (AI-Optimized)
-CREATE OR REPLACE FUNCTION telemetry.export_json(
+-- P4: Export flight recorder data to JSON format (AI-Optimized)
+CREATE OR REPLACE FUNCTION flight_recorder.export_json(
     p_start_time TIMESTAMPTZ,
     p_end_time TIMESTAMPTZ
 )
@@ -4053,11 +4053,11 @@ DECLARE
 BEGIN
     -- 1. Get Anomalies (High signal)
     SELECT jsonb_agg(to_jsonb(r)) INTO v_anomalies
-    FROM telemetry.anomaly_report(p_start_time, p_end_time) r;
+    FROM flight_recorder.anomaly_report(p_start_time, p_end_time) r;
 
     -- 2. Get Wait Summary (High signal)
     SELECT jsonb_agg(to_jsonb(r)) INTO v_wait_summary
-    FROM telemetry.wait_summary(p_start_time, p_end_time) r;
+    FROM flight_recorder.wait_summary(p_start_time, p_end_time) r;
 
     -- 3. Get Samples (Compact format: Array of Arrays)
     -- Schema: [captured_at, [wait_events], [locks]]
@@ -4073,7 +4073,7 @@ BEGIN
                     ws.wait_event,
                     ws.count
                 ))
-                FROM telemetry.wait_samples ws
+                FROM flight_recorder.wait_samples ws
                 WHERE ws.sample_id = s.id
             ), '[]'::jsonb),
             COALESCE((
@@ -4083,13 +4083,13 @@ BEGIN
                     ls.lock_type,
                     ls.blocked_duration
                 ))
-                FROM telemetry.lock_samples ls
+                FROM flight_recorder.lock_samples ls
                 WHERE ls.sample_id = s.id
             ), '[]'::jsonb)
         )
     )
     INTO v_samples
-    FROM telemetry.samples s
+    FROM flight_recorder.samples s
     WHERE s.captured_at BETWEEN p_start_time AND p_end_time;
 
     -- 4. Get Snapshots (Compact format)
@@ -4104,7 +4104,7 @@ BEGIN
         )
     )
     INTO v_snapshots
-    FROM telemetry.snapshots sn
+    FROM flight_recorder.snapshots sn
     WHERE sn.captured_at BETWEEN p_start_time AND p_end_time;
 
     -- Build Final Result with Schema Hints for AI
@@ -4129,7 +4129,7 @@ END;
 $$;
 
 -- P4: Configuration recommendations engine
-CREATE OR REPLACE FUNCTION telemetry.config_recommendations()
+CREATE OR REPLACE FUNCTION flight_recorder.config_recommendations()
 RETURNS TABLE(
     category TEXT,
     recommendation TEXT,
@@ -4147,20 +4147,20 @@ DECLARE
     v_retention_snapshots INTEGER;
 BEGIN
     -- Get current state
-    v_mode := telemetry._get_config('mode', 'normal');
-    SELECT schema_size_mb INTO v_schema_size_mb FROM telemetry._check_schema_size();
-    SELECT count(*) INTO v_sample_count FROM telemetry.samples;
-    SELECT count(*) INTO v_snapshot_count FROM telemetry.snapshots;
+    v_mode := flight_recorder._get_config('mode', 'normal');
+    SELECT schema_size_mb INTO v_schema_size_mb FROM flight_recorder._check_schema_size();
+    SELECT count(*) INTO v_sample_count FROM flight_recorder.samples;
+    SELECT count(*) INTO v_snapshot_count FROM flight_recorder.snapshots;
 
     SELECT avg(duration_ms) INTO v_avg_sample_ms
-    FROM telemetry.collection_stats
+    FROM flight_recorder.collection_stats
     WHERE collection_type = 'sample'
       AND success = true
       AND skipped = false
       AND started_at > now() - interval '24 hours';
 
-    v_retention_samples := telemetry._get_config('retention_samples_days', '7')::integer;
-    v_retention_snapshots := telemetry._get_config('retention_snapshots_days', '30')::integer;
+    v_retention_samples := flight_recorder._get_config('retention_samples_days', '7')::integer;
+    v_retention_snapshots := flight_recorder._get_config('retention_snapshots_days', '30')::integer;
 
     -- Recommendation 1: Mode optimization
     IF v_avg_sample_ms > 1000 AND v_mode = 'normal' THEN
@@ -4168,7 +4168,7 @@ BEGIN
             'Performance'::text,
             'Switch to light mode'::text,
             format('Average sample duration is %s ms, which may impact system performance', round(v_avg_sample_ms)),
-            'SELECT telemetry.set_mode(''light'');'::text;
+            'SELECT flight_recorder.set_mode(''light'');'::text;
     END IF;
 
     -- Recommendation 2: Schema size
@@ -4177,7 +4177,7 @@ BEGIN
             'Storage'::text,
             'Run cleanup to reclaim space'::text,
             format('Schema size is %s MB', round(v_schema_size_mb)::text),
-            'SELECT * FROM telemetry.cleanup();'::text;
+            'SELECT * FROM flight_recorder.cleanup();'::text;
     END IF;
 
     -- Recommendation 3: Retention tuning
@@ -4186,16 +4186,16 @@ BEGIN
             'Storage'::text,
             'Reduce sample retention period'::text,
             format('High sample count (%s) with %s day retention', v_sample_count, v_retention_samples),
-            format('UPDATE telemetry.config SET value = ''3'' WHERE key = ''retention_samples_days'';')::text;
+            format('UPDATE flight_recorder.config SET value = ''3'' WHERE key = ''retention_samples_days'';')::text;
     END IF;
 
     -- Recommendation 4: Auto-mode
-    IF v_avg_sample_ms > 500 AND telemetry._get_config('auto_mode_enabled', 'false') = 'false' THEN
+    IF v_avg_sample_ms > 500 AND flight_recorder._get_config('auto_mode_enabled', 'false') = 'false' THEN
         RETURN QUERY SELECT
             'Automation'::text,
             'Enable automatic mode switching'::text,
             'Sample duration varies significantly - auto-mode can help reduce overhead during peaks'::text,
-            'UPDATE telemetry.config SET value = ''true'' WHERE key = ''auto_mode_enabled'';'::text;
+            'UPDATE flight_recorder.config SET value = ''true'' WHERE key = ''auto_mode_enabled'';'::text;
     END IF;
 
     -- Recommendation 5: Consider partitioning
@@ -4219,8 +4219,8 @@ END;
 $$;
 
 -- Capture initial snapshot and sample
-SELECT telemetry.snapshot();
-SELECT telemetry.sample();
+SELECT flight_recorder.snapshot();
+SELECT flight_recorder.sample();
 
 -- -----------------------------------------------------------------------------
 -- Done
@@ -4232,10 +4232,10 @@ DECLARE
 BEGIN
     -- Determine what sampling schedule was configured
     SELECT schedule INTO v_sample_schedule
-    FROM cron.job WHERE jobname = 'telemetry_sample';
+    FROM cron.job WHERE jobname = 'flight_recorder_sample';
 
     RAISE NOTICE '';
-    RAISE NOTICE 'Telemetry installed successfully.';
+    RAISE NOTICE 'Flight Recorder installed successfully.';
     RAISE NOTICE '';
     RAISE NOTICE 'Collection schedule:';
     RAISE NOTICE '  - Snapshots: every 5 minutes (WAL, checkpoints, I/O stats)';
@@ -4244,34 +4244,34 @@ BEGIN
     RAISE NOTICE '';
     RAISE NOTICE 'Quick start for batch monitoring:';
     RAISE NOTICE '  1. Track your target table:';
-    RAISE NOTICE '     SELECT telemetry.track_table(''my_table'');';
+    RAISE NOTICE '     SELECT flight_recorder.track_table(''my_table'');';
     RAISE NOTICE '';
     RAISE NOTICE '  2. Run your batch job, then analyze:';
-    RAISE NOTICE '     SELECT * FROM telemetry.compare(''2024-12-16 14:00'', ''2024-12-16 15:00'');';
-    RAISE NOTICE '     SELECT * FROM telemetry.table_compare(''my_table'', ''2024-12-16 14:00'', ''2024-12-16 15:00'');';
-    RAISE NOTICE '     SELECT * FROM telemetry.wait_summary(''2024-12-16 14:00'', ''2024-12-16 15:00'');';
+    RAISE NOTICE '     SELECT * FROM flight_recorder.compare(''2024-12-16 14:00'', ''2024-12-16 15:00'');';
+    RAISE NOTICE '     SELECT * FROM flight_recorder.table_compare(''my_table'', ''2024-12-16 14:00'', ''2024-12-16 15:00'');';
+    RAISE NOTICE '     SELECT * FROM flight_recorder.wait_summary(''2024-12-16 14:00'', ''2024-12-16 15:00'');';
     RAISE NOTICE '';
     RAISE NOTICE 'Views for recent activity:';
-    RAISE NOTICE '  - telemetry.deltas            (snapshot deltas incl. temp files)';
-    RAISE NOTICE '  - telemetry.table_deltas      (tracked table deltas)';
-    RAISE NOTICE '  - telemetry.recent_waits      (wait events, last 2 hours)';
-    RAISE NOTICE '  - telemetry.recent_activity   (active sessions, last 2 hours)';
-    RAISE NOTICE '  - telemetry.recent_locks      (lock contention, last 2 hours)';
-    RAISE NOTICE '  - telemetry.recent_progress   (vacuum/copy/analyze progress, last 2 hours)';
-    RAISE NOTICE '  - telemetry.recent_replication (replication lag, last 2 hours)';
+    RAISE NOTICE '  - flight_recorder.deltas            (snapshot deltas incl. temp files)';
+    RAISE NOTICE '  - flight_recorder.table_deltas      (tracked table deltas)';
+    RAISE NOTICE '  - flight_recorder.recent_waits      (wait events, last 2 hours)';
+    RAISE NOTICE '  - flight_recorder.recent_activity   (active sessions, last 2 hours)';
+    RAISE NOTICE '  - flight_recorder.recent_locks      (lock contention, last 2 hours)';
+    RAISE NOTICE '  - flight_recorder.recent_progress   (vacuum/copy/analyze progress, last 2 hours)';
+    RAISE NOTICE '  - flight_recorder.recent_replication (replication lag, last 2 hours)';
     RAISE NOTICE '';
     RAISE NOTICE 'Table management:';
-    RAISE NOTICE '  - telemetry.track_table(name, schema)';
-    RAISE NOTICE '  - telemetry.untrack_table(name, schema)';
-    RAISE NOTICE '  - telemetry.list_tracked_tables()';
+    RAISE NOTICE '  - flight_recorder.track_table(name, schema)';
+    RAISE NOTICE '  - flight_recorder.untrack_table(name, schema)';
+    RAISE NOTICE '  - flight_recorder.list_tracked_tables()';
     RAISE NOTICE '';
 EXCEPTION
     WHEN undefined_table THEN
         -- pg_cron not available, show generic message
         RAISE NOTICE '';
-        RAISE NOTICE 'Telemetry installed successfully.';
+        RAISE NOTICE 'Flight Recorder installed successfully.';
         RAISE NOTICE '';
-        RAISE NOTICE 'NOTE: pg_cron not available. Run telemetry.snapshot() and telemetry.sample() manually.';
+        RAISE NOTICE 'NOTE: pg_cron not available. Run flight_recorder.snapshot() and flight_recorder.sample() manually.';
         RAISE NOTICE '';
 END;
 $$;

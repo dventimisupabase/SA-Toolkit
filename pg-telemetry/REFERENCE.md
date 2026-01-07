@@ -1,4 +1,4 @@
-# pg-telemetry
+# pg-flight-recorder
 
 Server-side performance telemetry for PostgreSQL. Continuously collects metrics to answer: "What was happening during this time window?"
 
@@ -14,7 +14,7 @@ Managed PostgreSQL platforms (Supabase, RDS, Cloud SQL) don't allow custom exten
 - Replication lag history
 - Per-table statistics for monitored tables
 
-**Trade-offs:** Dedicated extensions are more efficient. Use pg-telemetry when you can't install extensions or need the additional metrics it provides (locks, progress, replication, I/O).
+**Trade-offs:** Dedicated extensions are more efficient. Use pg-flight-recorder when you can't install extensions or need the additional metrics it provides (locks, progress, replication, I/O).
 
 ## Requirements
 
@@ -54,18 +54,18 @@ Once deployed, telemetry collects automatically via `pg_cron`:
 
 ```sql
 -- View recent activity (rolling 2-hour window)
-SELECT * FROM telemetry.recent_waits;
-SELECT * FROM telemetry.recent_locks;
-SELECT * FROM telemetry.recent_activity;
+SELECT * FROM flight_recorder.recent_waits;
+SELECT * FROM flight_recorder.recent_locks;
+SELECT * FROM flight_recorder.recent_activity;
 
 -- Compare system metrics between two time points
-SELECT * FROM telemetry.compare('2024-12-16 14:00', '2024-12-16 15:00');
+SELECT * FROM flight_recorder.compare('2024-12-16 14:00', '2024-12-16 15:00');
 
 -- Automatic anomaly detection
-SELECT * FROM telemetry.anomaly_report('2024-12-16 14:00', '2024-12-16 15:00');
+SELECT * FROM flight_recorder.anomaly_report('2024-12-16 14:00', '2024-12-16 15:00');
 
 -- Comprehensive diagnostic report
-SELECT * FROM telemetry.summary_report('2024-12-16 14:00', '2024-12-16 15:00');
+SELECT * FROM flight_recorder.summary_report('2024-12-16 14:00', '2024-12-16 15:00');
 ```
 
 ### Table Tracking
@@ -84,22 +84,22 @@ Track specific tables for detailed monitoring:
 
 ```sql
 -- Register a table
-SELECT telemetry.track_table('orders');
+SELECT flight_recorder.track_table('orders');
 
 -- Compare table stats between time points
-SELECT * FROM telemetry.table_compare('orders', '2024-12-16 14:00', '2024-12-16 15:00');
+SELECT * FROM flight_recorder.table_compare('orders', '2024-12-16 14:00', '2024-12-16 15:00');
 ```
 
 ### Query Analysis (requires pg_stat_statements)
 
 ```sql
 -- Compare query performance between time windows
-SELECT * FROM telemetry.statement_compare('2024-12-16 14:00', '2024-12-16 15:00');
+SELECT * FROM flight_recorder.statement_compare('2024-12-16 14:00', '2024-12-16 15:00');
 ```
 
 ## How It Works
 
-Telemetry uses `pg_cron` to run two types of collection:
+Flight Recorder uses `pg_cron` to run two types of collection:
 
 1. **Snapshots** (every 5 minutes): Cumulative stats from `pg_stat_*` views (WAL, checkpoints, bgwriter, replication, temp files, I/O)
 2. **Samples** (every 30 seconds): Point-in-time snapshots of wait events, active sessions, locks, and operation progress
@@ -110,23 +110,23 @@ Analysis functions compare snapshots or aggregate samples to diagnose performanc
 
 | Function | Purpose |
 |----------|---------|
-| `telemetry.compare(start, end)` | Compare system stats between time points |
-| `telemetry.wait_summary(start, end)` | Aggregate wait events over time period |
-| `telemetry.activity_at(timestamp)` | What was happening at specific moment? |
-| `telemetry.anomaly_report(start, end)` | Automatic detection of 6 issue types |
-| `telemetry.summary_report(start, end)` | Comprehensive diagnostic report |
-| `telemetry.table_compare(table, start, end)` | Compare table stats |
-| `telemetry.statement_compare(start, end)` | Compare query performance |
+| `flight_recorder.compare(start, end)` | Compare system stats between time points |
+| `flight_recorder.wait_summary(start, end)` | Aggregate wait events over time period |
+| `flight_recorder.activity_at(timestamp)` | What was happening at specific moment? |
+| `flight_recorder.anomaly_report(start, end)` | Automatic detection of 6 issue types |
+| `flight_recorder.summary_report(start, end)` | Comprehensive diagnostic report |
+| `flight_recorder.table_compare(table, start, end)` | Compare table stats |
+| `flight_recorder.statement_compare(start, end)` | Compare query performance |
 
 ## Key Views
 
 | View | Purpose |
 |------|---------|
-| `telemetry.recent_waits` | Wait events (last 2 hours) |
-| `telemetry.recent_activity` | Active sessions (last 2 hours) |
-| `telemetry.recent_locks` | Lock contention (last 2 hours) |
-| `telemetry.recent_progress` | Operation progress (last 2 hours) |
-| `telemetry.deltas` | Snapshot deltas (checkpoint, WAL, buffers) |
+| `flight_recorder.recent_waits` | Wait events (last 2 hours) |
+| `flight_recorder.recent_activity` | Active sessions (last 2 hours) |
+| `flight_recorder.recent_locks` | Lock contention (last 2 hours) |
+| `flight_recorder.recent_progress` | Operation progress (last 2 hours) |
+| `flight_recorder.deltas` | Snapshot deltas (checkpoint, WAL, buffers) |
 
 ## Collection Modes
 
@@ -140,22 +140,22 @@ Reduce overhead on stressed systems:
 
 ```sql
 -- Switch modes
-SELECT telemetry.set_mode('emergency');
+SELECT flight_recorder.set_mode('emergency');
 
 -- Check current mode
-SELECT * FROM telemetry.get_mode();
+SELECT * FROM flight_recorder.get_mode();
 ```
 
 ### Kill Switch
 
-For real emergencies, completely stop all telemetry collection:
+For real emergencies, completely stop all flight recorder collection:
 
 ```sql
 -- Stop all collection immediately (unschedules all cron jobs)
-SELECT telemetry.disable();
+SELECT flight_recorder.disable();
 
 -- Restart collection when crisis is over
-SELECT telemetry.enable();
+SELECT flight_recorder.enable();
 ```
 
 **What it does:**
@@ -164,7 +164,7 @@ SELECT telemetry.enable();
 
 ## Safety Features
 
-pg-telemetry includes P0 production safety mechanisms to prevent the observer from becoming part of the problem:
+pg-flight-recorder includes P0 production safety mechanisms to prevent the observer from becoming part of the problem:
 
 ### 1. Statement & Lock Timeouts
 
@@ -190,7 +190,7 @@ Automatic protection against slow or stuck collectors:
 ```sql
 -- View circuit breaker status and collection performance
 SELECT collection_type, started_at, duration_ms, success, skipped
-FROM telemetry.collection_stats
+FROM flight_recorder.collection_stats
 ORDER BY started_at DESC
 LIMIT 20;
 ```
@@ -204,10 +204,10 @@ LIMIT 20;
 **Configuration:**
 ```sql
 -- Adjust threshold (milliseconds)
-UPDATE telemetry.config SET value = '10000' WHERE key = 'circuit_breaker_threshold_ms';
+UPDATE flight_recorder.config SET value = '10000' WHERE key = 'circuit_breaker_threshold_ms';
 
 -- Disable circuit breaker (not recommended for production)
-UPDATE telemetry.config SET value = 'false' WHERE key = 'circuit_breaker_enabled';
+UPDATE flight_recorder.config SET value = 'false' WHERE key = 'circuit_breaker_enabled';
 ```
 
 ### 4. Limited Result Sets
@@ -219,11 +219,11 @@ Safety limits on expensive queries:
 
 ### 5. Schema Size Monitoring (P1)
 
-Automatic monitoring and enforcement of telemetry schema size limits:
+Automatic monitoring and enforcement of flight recorder schema size limits:
 
 ```sql
 -- Check current schema size and status
-SELECT * FROM telemetry._check_schema_size();
+SELECT * FROM flight_recorder._check_schema_size();
 ```
 
 **How it works:**
@@ -235,11 +235,11 @@ SELECT * FROM telemetry._check_schema_size();
 **Configuration:**
 ```sql
 -- Adjust thresholds (megabytes)
-UPDATE telemetry.config SET value = '8000' WHERE key = 'schema_size_warning_mb';
-UPDATE telemetry.config SET value = '15000' WHERE key = 'schema_size_critical_mb';
+UPDATE flight_recorder.config SET value = '8000' WHERE key = 'schema_size_warning_mb';
+UPDATE flight_recorder.config SET value = '15000' WHERE key = 'schema_size_critical_mb';
 
 -- Disable monitoring (not recommended)
-UPDATE telemetry.config SET value = 'false' WHERE key = 'schema_size_check_enabled';
+UPDATE flight_recorder.config SET value = 'false' WHERE key = 'schema_size_check_enabled';
 ```
 
 ### 6. Optimized pg_stat_io Collection (P1)
@@ -256,12 +256,12 @@ Automatic space reclamation after data deletion:
 
 ```sql
 -- Cleanup now returns vacuum results
-SELECT * FROM telemetry.cleanup('7 days');
+SELECT * FROM flight_recorder.cleanup('7 days');
 -- Returns: deleted_snapshots, deleted_samples, vacuumed_tables
 ```
 
 **What it does:**
-- Runs `VACUUM ANALYZE` on all telemetry tables after cleanup
+- Runs `VACUUM ANALYZE` on all flight recorder tables after cleanup
 - Reclaims disk space from deleted rows
 - Updates query planner statistics
 - Prevents table bloat over time
@@ -273,11 +273,11 @@ Monitors system health and auto-adjusts collection mode based on load indicators
 
 ```sql
 -- Enable automatic mode switching
-UPDATE telemetry.config SET value = 'true' WHERE key = 'auto_mode_enabled';
+UPDATE flight_recorder.config SET value = 'true' WHERE key = 'auto_mode_enabled';
 
 -- Configure thresholds
-UPDATE telemetry.config SET value = '80' WHERE key = 'auto_mode_connections_threshold';
-UPDATE telemetry.config SET value = '3' WHERE key = 'auto_mode_trips_threshold';
+UPDATE flight_recorder.config SET value = '80' WHERE key = 'auto_mode_connections_threshold';
+UPDATE flight_recorder.config SET value = '3' WHERE key = 'auto_mode_trips_threshold';
 ```
 
 **How it works:**
@@ -289,7 +289,7 @@ UPDATE telemetry.config SET value = '3' WHERE key = 'auto_mode_trips_threshold';
 - Mode changes logged via PostgreSQL NOTICE
 
 **Why use it:**
-- Reduces telemetry overhead automatically during high load
+- Reduces flight recorder overhead automatically during high load
 - Prevents telemetry from contributing to cascading failures
 - Auto-recovers to normal monitoring when system stabilizes
 
@@ -299,16 +299,16 @@ Different retention periods for different data types:
 
 ```sql
 -- Configure retention (days)
-UPDATE telemetry.config SET value = '7' WHERE key = 'retention_samples_days';      -- High frequency
-UPDATE telemetry.config SET value = '30' WHERE key = 'retention_snapshots_days';   -- Cumulative stats
-UPDATE telemetry.config SET value = '30' WHERE key = 'retention_statements_days';  -- Query stats
+UPDATE flight_recorder.config SET value = '7' WHERE key = 'retention_samples_days';      -- High frequency
+UPDATE flight_recorder.config SET value = '30' WHERE key = 'retention_snapshots_days';   -- Cumulative stats
+UPDATE flight_recorder.config SET value = '30' WHERE key = 'retention_statements_days';  -- Query stats
 
 -- Cleanup uses configured retention (new default behavior)
-SELECT * FROM telemetry.cleanup();
+SELECT * FROM flight_recorder.cleanup();
 -- Returns: deleted_snapshots, deleted_samples, deleted_statements, vacuumed_tables
 
 -- Legacy: Specify retention explicitly (overrides config)
-SELECT * FROM telemetry.cleanup('7 days');
+SELECT * FROM flight_recorder.cleanup('7 days');
 ```
 
 **Benefits:**
@@ -322,14 +322,14 @@ Optional functions for time-based partitioning (advanced use case):
 
 ```sql
 -- Check current partition status
-SELECT * FROM telemetry.partition_status();
+SELECT * FROM flight_recorder.partition_status();
 
 -- Create next partition (if using partitioned tables)
-SELECT telemetry.create_next_partition('samples', 'day');
-SELECT telemetry.create_next_partition('snapshots', 'week');
+SELECT flight_recorder.create_next_partition('samples', 'day');
+SELECT flight_recorder.create_next_partition('snapshots', 'week');
 
 -- Drop old partitions (faster than DELETE)
-SELECT * FROM telemetry.drop_old_partitions('samples', '7 days');
+SELECT * FROM flight_recorder.drop_old_partitions('samples', '7 days');
 ```
 
 **When to use:**
@@ -341,20 +341,20 @@ SELECT * FROM telemetry.drop_old_partitions('samples', '7 days');
 
 ### 11. Health Checks and Self-Monitoring (P3)
 
-Operational visibility into the telemetry system itself:
+Operational visibility into the flight recorder system itself:
 
 ```sql
--- Quick health status of all telemetry components
-SELECT * FROM telemetry.health_check();
+-- Quick health status of all flight recorder components
+SELECT * FROM flight_recorder.health_check();
 -- Returns: component, status, details, action_required
 
 -- Analyze telemetry performance impact over time
-SELECT * FROM telemetry.performance_report('24 hours');
+SELECT * FROM flight_recorder.performance_report('24 hours');
 -- Returns: metric, value, assessment
 ```
 
 **Components monitored:**
-- **Telemetry System**: Enabled/disabled status, current mode
+- **Flight Recorder System**: Enabled/disabled status, current mode
 - **Schema Size**: Current size vs thresholds with percentage
 - **Circuit Breaker**: Recent trips in last hour
 - **Collection Freshness**: When last sample/snapshot was collected
@@ -378,14 +378,14 @@ Proactive notifications for critical conditions:
 
 ```sql
 -- Enable alerts
-UPDATE telemetry.config SET value = 'true' WHERE key = 'alert_enabled';
+UPDATE flight_recorder.config SET value = 'true' WHERE key = 'alert_enabled';
 
 -- Configure thresholds
-UPDATE telemetry.config SET value = '5' WHERE key = 'alert_circuit_breaker_count';  -- 5 trips/hour
-UPDATE telemetry.config SET value = '8000' WHERE key = 'alert_schema_size_mb';      -- 8GB warning
+UPDATE flight_recorder.config SET value = '5' WHERE key = 'alert_circuit_breaker_count';  -- 5 trips/hour
+UPDATE flight_recorder.config SET value = '8000' WHERE key = 'alert_schema_size_mb';      -- 8GB warning
 
 -- Check for active alerts
-SELECT * FROM telemetry.check_alerts('1 hour');
+SELECT * FROM flight_recorder.check_alerts('1 hour');
 -- Returns: alert_type, severity, message, triggered_at, recommendation
 ```
 
@@ -402,11 +402,11 @@ SELECT * FROM telemetry.check_alerts('1 hour');
 
 ### 13. AI Data Export (P4)
 
-Export telemetry data in a compact, token-efficient format optimized for LLM analysis (ChatGPT, Claude, etc.):
+Export flight recorder data in a compact, token-efficient format optimized for LLM analysis (ChatGPT, Claude, etc.):
 
 ```sql
 -- Export to AI-friendly JSON
-SELECT telemetry.export_json(
+SELECT flight_recorder.export_json(
     '2024-12-16 14:00'::timestamptz,
     '2024-12-16 15:00'::timestamptz
 );
@@ -439,7 +439,7 @@ AI-assisted configuration optimization:
 
 ```sql
 -- Get personalized recommendations based on actual usage
-SELECT * FROM telemetry.config_recommendations();
+SELECT * FROM flight_recorder.config_recommendations();
 -- Returns: category, recommendation, reason, sql_command
 ```
 
@@ -453,9 +453,9 @@ SELECT * FROM telemetry.config_recommendations();
 ```
 category     | recommendation                  | reason                           | sql_command
 -------------|---------------------------------|----------------------------------|---------------------------
-Performance  | Switch to light mode            | Average sample duration is 1200ms| SELECT telemetry.set_mode('light');
-Storage      | Run cleanup to reclaim space    | Schema size is 6500 MB           | SELECT * FROM telemetry.cleanup();
-Automation   | Enable automatic mode switching | Sample duration varies           | UPDATE telemetry.config SET...
+Performance  | Switch to light mode            | Average sample duration is 1200ms| SELECT flight_recorder.set_mode('light');
+Storage      | Run cleanup to reclaim space    | Schema size is 6500 MB           | SELECT * FROM flight_recorder.cleanup();
+Automation   | Enable automatic mode switching | Sample duration varies           | UPDATE flight_recorder.config SET...
 ```
 
 **When to use:**
@@ -479,20 +479,20 @@ Automatically detects 6 common issues:
 
 ```sql
 SELECT anomaly_type, severity, description, recommendation
-FROM telemetry.anomaly_report('2024-12-16 14:00', '2024-12-16 15:00');
+FROM flight_recorder.anomaly_report('2024-12-16 14:00', '2024-12-16 15:00');
 ```
 
 ## Project Structure
 
 ```
-pg-telemetry/
+pg-flight-recorder/
 ├── supabase/
 │   ├── config.toml              # Supabase configuration
 │   ├── migrations/
 │   │   ├── 20260105000000_enable_pg_cron.sql
-│   │   └── 20260106000000_pg_telemetry.sql
+│   │   └── 20260106000000_pg_flight_recorder.sql
 │   └── tests/
-│       └── 00001_telemetry_test.sql
+│       └── 00001_flight_recorder_test.sql
 ├── install.sql                  # Standalone install (non-Supabase)
 ├── uninstall.sql                # Standalone uninstall
 └── README.md
@@ -548,8 +548,8 @@ Requires PostgreSQL 15+ with pg_cron and superuser privileges.
 
 ## Important Notes
 
-- Telemetry runs automatically after installation via `pg_cron`
-- Default retention is 7 days (configurable via `telemetry.cleanup()`)
+- Flight Recorder runs automatically after installation via `pg_cron`
+- Default retention is 7 days (configurable via `flight_recorder.cleanup()`)
 - If pg_cron < 1.4.1, sampling falls back to every minute instead of 30 seconds
 - pg_stat_statements is optional but recommended for query analysis
-- For stressed systems, use `telemetry.set_mode('emergency')` to reduce overhead
+- For stressed systems, use `flight_recorder.set_mode('emergency')` to reduce overhead

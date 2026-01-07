@@ -1,7 +1,7 @@
 -- =============================================================================
--- Uninstall pg-telemetry
+-- Uninstall pg-flight-recorder
 -- =============================================================================
--- Removes all cron jobs and telemetry data/functions.
+-- Removes all cron jobs and flight recorder data/functions.
 -- Run with: psql -f uninstall.sql
 -- =============================================================================
 
@@ -14,17 +14,17 @@ BEGIN
     -- Collect job IDs before unscheduling
     SELECT array_agg(jobid) INTO v_jobids
     FROM cron.job
-    WHERE jobname IN ('telemetry_snapshot', 'telemetry_sample', 'telemetry_cleanup');
+    WHERE jobname IN ('flight_recorder_snapshot', 'flight_recorder_sample', 'flight_recorder_cleanup');
 
     -- Unschedule jobs
-    PERFORM cron.unschedule('telemetry_snapshot')
-    WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_snapshot');
+    PERFORM cron.unschedule('flight_recorder_snapshot')
+    WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'flight_recorder_snapshot');
 
-    PERFORM cron.unschedule('telemetry_sample')
-    WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_sample');
+    PERFORM cron.unschedule('flight_recorder_sample')
+    WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'flight_recorder_sample');
 
-    PERFORM cron.unschedule('telemetry_cleanup')
-    WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_cleanup');
+    PERFORM cron.unschedule('flight_recorder_cleanup')
+    WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'flight_recorder_cleanup');
 
     -- Clean up job run history
     IF v_jobids IS NOT NULL THEN
@@ -41,16 +41,16 @@ END;
 $$;
 
 -- Drop schema and all objects
-DROP SCHEMA IF EXISTS telemetry CASCADE;
+DROP SCHEMA IF EXISTS flight_recorder CASCADE;
 
 DO $$
 BEGIN
     RAISE NOTICE '';
-    RAISE NOTICE 'Telemetry uninstalled successfully.';
+    RAISE NOTICE 'Flight Recorder uninstalled successfully.';
     RAISE NOTICE '';
     RAISE NOTICE 'Removed:';
-    RAISE NOTICE '  - All telemetry tables and data';
-    RAISE NOTICE '  - All telemetry functions and views';
+    RAISE NOTICE '  - All flight recorder tables and data';
+    RAISE NOTICE '  - All flight recorder functions and views';
     RAISE NOTICE '  - All scheduled cron jobs (snapshot, sample, cleanup)';
     RAISE NOTICE '  - All cron job execution history';
     RAISE NOTICE '';

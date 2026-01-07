@@ -1,4 +1,4 @@
-# pg-telemetry Testing Report
+# pg-flight-recorder Testing Report
 
 ## Test Environment
 - **PostgreSQL Version:** 17.6
@@ -13,9 +13,9 @@
 - All 19 functions created
 - All 7 views created
 - pg_cron jobs scheduled correctly:
-  - `telemetry_snapshot`: every 5 minutes
-  - `telemetry_sample`: every 30 seconds
-  - `telemetry_cleanup`: daily at 3 AM
+  - `flight_recorder_snapshot`: every 5 minutes
+  - `flight_recorder_sample`: every 30 seconds
+  - `flight_recorder_cleanup`: daily at 3 AM
 
 ### ⚠️  PostgreSQL 17 Compatibility Issue Found and Fixed
 
@@ -32,7 +32,7 @@ ERROR: column p.max_dead_tuples does not exist
 - PG15/16: Uses `max_dead_tuples`, `num_dead_tuples`
 - PG17: Uses `max_dead_tuple_bytes`, `dead_tuple_bytes`, `num_dead_item_ids`
 
-**Fix Location:** `/pg-telemetry/sql/fix_pg17_sample.sql`
+**Fix Location:** `/pg-flight-recorder/sql/fix_pg17_sample.sql`
 
 ## Functionality Tests
 
@@ -120,7 +120,7 @@ LOCK CONTENTION:
 
 ## Conclusion
 
-✅ **pg-telemetry is fully functional on PostgreSQL 17.6** after applying the PG17 compatibility fix. All core features work as documented:
+✅ **pg-flight-recorder is fully functional on PostgreSQL 17.6** after applying the PG17 compatibility fix. All core features work as documented:
 - Automatic data collection via pg_cron
 - Comprehensive system metrics
 - Analysis functions for performance diagnostics
