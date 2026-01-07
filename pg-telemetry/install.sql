@@ -2906,7 +2906,7 @@ BEGIN
     -- Set mode-specific configuration (A-GRADE: Normal mode now 60s instead of 30s)
     CASE p_mode
         WHEN 'normal' THEN
-            v_interval := '60 seconds';  -- A-GRADE: INCREASED from 30s to 60s for safety
+            v_interval := '* * * * *';  -- Every minute (cron format for 60s) - A-GRADE: INCREASED from 30s
             v_enable_locks := TRUE;
             v_enable_progress := TRUE;
             v_description := 'Normal mode: 60s sampling (A-GRADE safety), all collectors enabled';
@@ -2989,7 +2989,7 @@ LANGUAGE sql STABLE AS $$
     SELECT
         flight_recorder._get_config('mode', 'normal') AS mode,
         CASE flight_recorder._get_config('mode', 'normal')
-            WHEN 'normal' THEN '30 seconds'
+            WHEN 'normal' THEN '60 seconds'
             WHEN 'light' THEN '60 seconds'
             WHEN 'emergency' THEN '120 seconds'
             ELSE 'unknown'
@@ -3311,10 +3311,8 @@ BEGIN
         v_scheduled := v_scheduled + 1;
 
         -- Schedule sample based on mode and pg_cron capabilities (A-GRADE: INCREASED from 30s to 60s)
-        IF v_mode = 'normal' AND v_supports_subsecond THEN
-            PERFORM cron.schedule('flight_recorder_sample', '60 seconds', 'SELECT flight_recorder.sample()');
-            v_sample_schedule := '60 seconds (A-GRADE safety)';
-        ELSIF v_mode = 'light' OR (v_mode = 'normal' AND NOT v_supports_subsecond) THEN
+        -- Note: pg_cron interval format only supports 1-59 seconds, so we use cron format for 60s
+        IF v_mode = 'normal' OR v_mode = 'light' THEN
             PERFORM cron.schedule('flight_recorder_sample', '* * * * *', 'SELECT flight_recorder.sample()');
             v_sample_schedule := '* * * * * (every minute)';
         ELSIF v_mode = 'emergency' THEN

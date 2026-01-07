@@ -418,10 +418,10 @@ SELECT lives_ok(
     'enable() should execute without error'
 );
 
--- Verify jobs are rescheduled
+-- Verify jobs are rescheduled (4 jobs: snapshot, sample, cleanup, partition)
 SELECT ok(
-    (SELECT count(*) FROM cron.job WHERE jobname LIKE 'flight_recorder%') = 3,
-    'All 3 telemetry cron jobs should be rescheduled after enable()'
+    (SELECT count(*) FROM cron.job WHERE jobname LIKE 'flight_recorder%') = 4,
+    'All 4 telemetry cron jobs should be rescheduled after enable()'
 );
 
 -- =============================================================================
@@ -569,10 +569,10 @@ SELECT ok(
     'P2: Auto mode trips threshold config should exist'
 );
 
--- Test P2: Auto mode defaults to disabled
+-- Test P2: Auto mode defaults to enabled (A-GRADE safety improvement)
 SELECT ok(
-    (SELECT value FROM flight_recorder.config WHERE key = 'auto_mode_enabled') = 'false',
-    'P2: Auto mode should be disabled by default'
+    (SELECT value FROM flight_recorder.config WHERE key = 'auto_mode_enabled') = 'true',
+    'P2: Auto mode should be enabled by default (A-GRADE safety)'
 );
 
 -- Test P2: Configurable retention config entries exist
