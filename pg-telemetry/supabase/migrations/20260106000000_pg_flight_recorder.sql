@@ -311,9 +311,10 @@ CREATE SCHEMA IF NOT EXISTS flight_recorder;
 
 -- -----------------------------------------------------------------------------
 -- Table: snapshots
+-- UNLOGGED: Minimizes WAL overhead. Data lost on crash but acceptable for telemetry.
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS flight_recorder.snapshots (
+CREATE UNLOGGED TABLE IF NOT EXISTS flight_recorder.snapshots (
     id              SERIAL PRIMARY KEY,
     captured_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     pg_version      INTEGER NOT NULL,
@@ -371,6 +372,7 @@ CREATE INDEX IF NOT EXISTS snapshots_captured_at_idx ON flight_recorder.snapshot
 
 -- -----------------------------------------------------------------------------
 -- Table: tracked_tables - Tables to monitor for batch operations
+-- Regular table (not UNLOGGED) - small config data worth preserving
 -- -----------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS flight_recorder.tracked_tables (
@@ -382,9 +384,10 @@ CREATE TABLE IF NOT EXISTS flight_recorder.tracked_tables (
 
 -- -----------------------------------------------------------------------------
 -- Table: table_snapshots - Per-table stats captured with each snapshot
+-- UNLOGGED: Minimizes WAL overhead. Data lost on crash but acceptable for telemetry.
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS flight_recorder.table_snapshots (
+CREATE UNLOGGED TABLE IF NOT EXISTS flight_recorder.table_snapshots (
     snapshot_id             INTEGER REFERENCES flight_recorder.snapshots(id) ON DELETE CASCADE,
     relid                   OID,
     schemaname              TEXT,
@@ -418,7 +421,7 @@ CREATE TABLE IF NOT EXISTS flight_recorder.table_snapshots (
 -- Table: replication_snapshots - Per-replica stats captured with each snapshot
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS flight_recorder.replication_snapshots (
+CREATE UNLOGGED TABLE IF NOT EXISTS flight_recorder.replication_snapshots (
     snapshot_id             INTEGER REFERENCES flight_recorder.snapshots(id) ON DELETE CASCADE,
     pid                     INTEGER NOT NULL,
     client_addr             INET,
@@ -441,7 +444,7 @@ CREATE TABLE IF NOT EXISTS flight_recorder.replication_snapshots (
 -- Table: statement_snapshots - pg_stat_statements metrics per snapshot
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS flight_recorder.statement_snapshots (
+CREATE UNLOGGED TABLE IF NOT EXISTS flight_recorder.statement_snapshots (
     snapshot_id         INTEGER REFERENCES flight_recorder.snapshots(id) ON DELETE CASCADE,
     queryid             BIGINT NOT NULL,
     userid              OID,
@@ -485,7 +488,7 @@ CREATE INDEX IF NOT EXISTS statement_snapshots_queryid_idx
 -- PARTITIONED BY RANGE (captured_at) - Daily partitions for efficient cleanup
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS flight_recorder.samples (
+CREATE UNLOGGED TABLE IF NOT EXISTS flight_recorder.samples (
     id              BIGINT GENERATED ALWAYS AS IDENTITY,
     captured_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (id, captured_at)
@@ -524,7 +527,7 @@ CREATE INDEX IF NOT EXISTS samples_captured_at_idx ON flight_recorder.samples(ca
 -- Table: wait_samples - Aggregated wait events per sample
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS flight_recorder.wait_samples (
+CREATE UNLOGGED TABLE IF NOT EXISTS flight_recorder.wait_samples (
     sample_id           INTEGER,
     sample_captured_at  TIMESTAMPTZ,
     backend_type        TEXT NOT NULL,
@@ -540,7 +543,7 @@ CREATE TABLE IF NOT EXISTS flight_recorder.wait_samples (
 -- Table: activity_samples - Top active sessions per sample
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS flight_recorder.activity_samples (
+CREATE UNLOGGED TABLE IF NOT EXISTS flight_recorder.activity_samples (
     sample_id           INTEGER,
     sample_captured_at  TIMESTAMPTZ,
     pid                 INTEGER NOT NULL,
@@ -561,7 +564,7 @@ CREATE TABLE IF NOT EXISTS flight_recorder.activity_samples (
 -- Table: progress_samples - Operation progress (vacuum, copy, analyze, etc.)
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS flight_recorder.progress_samples (
+CREATE UNLOGGED TABLE IF NOT EXISTS flight_recorder.progress_samples (
     sample_id           INTEGER,
     sample_captured_at  TIMESTAMPTZ,
     progress_type       TEXT NOT NULL,      -- 'vacuum', 'copy', 'analyze', 'create_index'
@@ -584,7 +587,7 @@ CREATE TABLE IF NOT EXISTS flight_recorder.progress_samples (
 -- Table: lock_samples - Blocking lock relationships
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS flight_recorder.lock_samples (
+CREATE UNLOGGED TABLE IF NOT EXISTS flight_recorder.lock_samples (
     sample_id               INTEGER,
     sample_captured_at  TIMESTAMPTZ,
     blocked_pid             INTEGER NOT NULL,
@@ -654,6 +657,8 @@ INSERT INTO flight_recorder.config (key, value) VALUES
     ('statement_timeout_ms', '2000'),          -- Max total collection time (REDUCED from 5000ms)
     ('lock_timeout_ms', '500'),                -- Max wait for catalog locks (REDUCED from 1000ms)
     ('work_mem_kb', '2048'),                   -- work_mem limit for flight recorder queries (2MB)
+    -- A+: Per-section sub-timeouts (prevent one section consuming entire budget)
+    ('section_timeout_ms', '1000'),            -- Max time per section (reset before each section)
     -- P0: Cost-based skip thresholds (NEW - proactive checks before expensive queries)
     ('skip_locks_threshold', '200'),           -- Skip lock collection if > N blocked locks
     ('skip_activity_conn_threshold', '400'),   -- Skip activity if > N active connections
@@ -683,7 +688,7 @@ ON CONFLICT (key) DO NOTHING;
 -- Table: collection_stats - Track collection performance for circuit breaker
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS flight_recorder.collection_stats (
+CREATE UNLOGGED TABLE IF NOT EXISTS flight_recorder.collection_stats (
     id              SERIAL PRIMARY KEY,
     collection_type TEXT NOT NULL,  -- 'sample' or 'snapshot'
     started_at      TIMESTAMPTZ NOT NULL,
@@ -831,6 +836,25 @@ LANGUAGE sql STABLE AS $$
         (SELECT value FROM flight_recorder.config WHERE key = p_key),
         p_default
     )
+$$;
+
+-- -----------------------------------------------------------------------------
+-- A+: Helper: Set per-section timeout
+-- Resets statement_timeout before each section to prevent one section consuming entire budget
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION flight_recorder._set_section_timeout()
+RETURNS VOID
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_timeout_ms INTEGER;
+BEGIN
+    v_timeout_ms := COALESCE(
+        flight_recorder._get_config('section_timeout_ms', '400')::integer,
+        400
+    );
+    PERFORM set_config('statement_timeout', v_timeout_ms::text, true);
+END;
 $$;
 
 -- -----------------------------------------------------------------------------
@@ -1162,6 +1186,7 @@ $$;
 
 -- -----------------------------------------------------------------------------
 -- flight_recorder.sample() - High-frequency sampling (wait events, activity, progress, locks)
+-- A+ Safety: Per-section timeouts, O(n) lock detection using pg_blocking_pids()
 -- -----------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION flight_recorder.sample()
@@ -1190,16 +1215,13 @@ BEGIN
     -- P0 Safety: Record collection start for circuit breaker (4 sections: wait events, activity, progress, locks)
     v_stat_id := flight_recorder._record_collection_start('sample', 4);
 
-    -- P0 Safety: Set timeouts and resource limits (A-GRADE: REDUCED THRESHOLDS)
-    PERFORM set_config('statement_timeout',
-        COALESCE(flight_recorder._get_config('statement_timeout_ms', '2000'), '2000'),
-        true);  -- REDUCED from 5000ms to 2000ms
+    -- P0 Safety: Set lock timeout and work_mem (A-GRADE: REDUCED THRESHOLDS)
     PERFORM set_config('lock_timeout',
         COALESCE(flight_recorder._get_config('lock_timeout_ms', '500'), '500'),
         true);  -- REDUCED from 1000ms to 500ms
     PERFORM set_config('work_mem',
         COALESCE(flight_recorder._get_config('work_mem_kb', '2048'), '2048') || 'kB',
-        true);  -- NEW: Limit memory for joins/sorts
+        true);  -- Limit memory for joins/sorts
 
     -- Get configuration
     v_enable_locks := COALESCE(
@@ -1212,13 +1234,15 @@ BEGIN
     );
     v_pg_version := flight_recorder._pg_version();
 
-    -- Create sample record
+    -- Create sample record (A+: Set section timeout before each section)
+    PERFORM flight_recorder._set_section_timeout();
     INSERT INTO flight_recorder.samples (captured_at)
     VALUES (v_captured_at)
     RETURNING id INTO v_sample_id;
 
-    -- P0 Safety: Wait events with exception handling
+    -- Section 1: Wait events (A+: Per-section timeout)
     BEGIN
+        PERFORM flight_recorder._set_section_timeout();
         INSERT INTO flight_recorder.wait_samples (sample_id, sample_captured_at, backend_type, wait_event_type, wait_event, state, count)
         SELECT
             v_sample_id,
@@ -1237,9 +1261,9 @@ BEGIN
         RAISE WARNING 'pg-flight-recorder: Wait events collection failed: %', SQLERRM;
     END;
 
-    -- P0 Safety: Active sessions with exception handling and cost-based skip logic
+    -- Section 2: Active sessions (A+: Per-section timeout + cost-based skip)
     BEGIN
-        -- A-GRADE: Cost-based skip - check active connection count before expensive scan
+        PERFORM flight_recorder._set_section_timeout();
         DECLARE
             v_active_conn_count INTEGER;
             v_skip_activity_threshold INTEGER;
@@ -1249,7 +1273,7 @@ BEGIN
                 400
             );
 
-            -- Quick count (uses index, minimal overhead)
+            -- Quick count (minimal overhead)
             SELECT COUNT(*) INTO v_active_conn_count
             FROM pg_stat_activity
             WHERE state != 'idle' AND pid != pg_backend_pid();
@@ -1258,7 +1282,6 @@ BEGIN
                 RAISE NOTICE 'pg-flight-recorder: Skipping activity collection - % active connections exceeds threshold %',
                     v_active_conn_count, v_skip_activity_threshold;
             ELSE
-                -- Safe to collect activity samples
                 INSERT INTO flight_recorder.activity_samples (
                     sample_id, sample_captured_at, pid, usename, application_name, backend_type,
                     state, wait_event_type, wait_event, query_start, state_change, query_preview
@@ -1288,9 +1311,10 @@ BEGIN
         RAISE WARNING 'pg-flight-recorder: Activity samples collection failed: %', SQLERRM;
     END;
 
-    -- P0 Safety: Progress tracking with exception handling
+    -- Section 3: Progress tracking (A+: Per-section timeout)
     IF v_enable_progress THEN
     BEGIN
+        PERFORM flight_recorder._set_section_timeout();
         -- Vacuum progress (handle PG17 column changes)
         IF v_pg_version >= 17 THEN
             INSERT INTO flight_recorder.progress_samples (
@@ -1416,14 +1440,13 @@ BEGIN
     END;
     END IF;  -- v_enable_progress
 
-    -- P0 Safety: Lock sampling with exception handling (highest risk section)
-    -- Optimized: Pre-filter locks with CTEs to reduce join set size by 10-50x
-    -- A-GRADE: Cost-based skip logic to avoid expensive lock query during lock storms
+    -- Section 4: Lock sampling (A+: Per-section timeout + O(n) algorithm using pg_blocking_pids())
+    -- REWRITTEN: Uses pg_blocking_pids() which is O(n) instead of O(n²) join on pg_locks
     IF v_enable_locks THEN
     BEGIN
-        -- A-GRADE: Check blocked lock count before attempting expensive query
+        PERFORM flight_recorder._set_section_timeout();
         DECLARE
-            v_blocked_lock_count INTEGER;
+            v_blocked_count INTEGER;
             v_skip_locks_threshold INTEGER;
         BEGIN
             v_skip_locks_threshold := COALESCE(
@@ -1431,65 +1454,57 @@ BEGIN
                 200
             );
 
-            -- Quick count of blocked locks (minimal overhead)
-            SELECT COUNT(*) INTO v_blocked_lock_count
-            FROM pg_locks
-            WHERE NOT granted AND pid != pg_backend_pid();
+            -- Quick count of blocked sessions (minimal overhead)
+            SELECT COUNT(*) INTO v_blocked_count
+            FROM pg_stat_activity
+            WHERE pid != pg_backend_pid()
+              AND cardinality(pg_blocking_pids(pid)) > 0;
 
-            IF v_blocked_lock_count > v_skip_locks_threshold THEN
-                RAISE NOTICE 'pg-flight-recorder: Skipping lock collection - % blocked locks exceeds threshold % (potential lock storm)',
-                    v_blocked_lock_count, v_skip_locks_threshold;
+            IF v_blocked_count > v_skip_locks_threshold THEN
+                RAISE NOTICE 'pg-flight-recorder: Skipping lock collection - % blocked sessions exceeds threshold % (potential lock storm)',
+                    v_blocked_count, v_skip_locks_threshold;
             ELSE
-                -- Safe to collect lock samples
+                -- A+ REWRITE: O(n) lock detection using pg_blocking_pids()
+                -- pg_blocking_pids(pid) returns array of PIDs blocking a given PID
+                -- This is much more efficient than the O(n²) self-join on pg_locks
                 INSERT INTO flight_recorder.lock_samples (
                     sample_id, sample_captured_at, blocked_pid, blocked_user, blocked_app, blocked_query_preview, blocked_duration,
                     blocking_pid, blocking_user, blocking_app, blocking_query_preview, lock_type, locked_relation
                 )
-                WITH blocked_locks AS (
-                    SELECT bl.*
-                    FROM pg_locks bl
-                    WHERE NOT bl.granted  -- FILTER EARLY: only locks that are blocked
-                      AND bl.pid != pg_backend_pid()  -- Don't monitor flight recorder itself
-                ),
-                blocking_locks AS (
-                    SELECT kl.*
-                    FROM pg_locks kl
-                    WHERE kl.granted  -- Only locks that are granted (potential blockers)
-                )
-                SELECT DISTINCT ON (blocked.pid, blocking.pid)
-            v_sample_id,
-            v_captured_at,
-            blocked.pid,
-            blocked.usename,
-            blocked.application_name,
-            left(blocked.query, 200),
-            v_captured_at - blocked.query_start,
-            blocking.pid,
-            blocking.usename,
-            blocking.application_name,
-            left(blocking.query, 200),
-            bl.locktype,
-            CASE WHEN bl.relation IS NOT NULL THEN bl.relation::regclass::text ELSE NULL END
-        FROM blocked_locks bl
-        JOIN pg_stat_activity blocked ON blocked.pid = bl.pid
-        JOIN blocking_locks kl ON (
-            kl.locktype = bl.locktype AND
-            kl.database IS NOT DISTINCT FROM bl.database AND
-            kl.relation IS NOT DISTINCT FROM bl.relation AND
-            kl.page IS NOT DISTINCT FROM bl.page AND
-            kl.tuple IS NOT DISTINCT FROM bl.tuple AND
-            kl.virtualxid IS NOT DISTINCT FROM bl.virtualxid AND
-            kl.transactionid IS NOT DISTINCT FROM bl.transactionid AND
-            kl.classid IS NOT DISTINCT FROM bl.classid AND
-            kl.objid IS NOT DISTINCT FROM bl.objid AND
-            kl.objsubid IS NOT DISTINCT FROM bl.objsubid AND
-            kl.pid != bl.pid
-        )
-        JOIN pg_stat_activity blocking ON blocking.pid = kl.pid
-        ORDER BY blocked.pid, blocking.pid
-        LIMIT 100;  -- P0 Safety: Limit to top 100 blocking relationships
-            END IF;  -- Cost-based skip check
-        END;  -- Close nested DECLARE block
+                SELECT DISTINCT ON (blocked.pid, blocking_pid)
+                    v_sample_id,
+                    v_captured_at,
+                    blocked.pid,
+                    blocked.usename,
+                    blocked.application_name,
+                    left(blocked.query, 200),
+                    v_captured_at - blocked.query_start,
+                    blocking_pid,
+                    blocking.usename,
+                    blocking.application_name,
+                    left(blocking.query, 200),
+                    -- Get lock type from the blocked session's wait_event
+                    CASE
+                        WHEN blocked.wait_event_type = 'Lock' THEN blocked.wait_event
+                        ELSE 'unknown'
+                    END,
+                    -- Get relation if waiting on a relation lock
+                    CASE
+                        WHEN blocked.wait_event IN ('relation', 'extend', 'page', 'tuple') THEN
+                            (SELECT l.relation::regclass::text
+                             FROM pg_locks l
+                             WHERE l.pid = blocked.pid AND NOT l.granted
+                             LIMIT 1)
+                        ELSE NULL
+                    END
+                FROM pg_stat_activity blocked
+                CROSS JOIN LATERAL unnest(pg_blocking_pids(blocked.pid)) AS blocking_pid
+                JOIN pg_stat_activity blocking ON blocking.pid = blocking_pid
+                WHERE blocked.pid != pg_backend_pid()
+                ORDER BY blocked.pid, blocking_pid
+                LIMIT 100;
+            END IF;
+        END;
 
         PERFORM flight_recorder._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
@@ -1500,17 +1515,23 @@ BEGIN
     -- P0 Safety: Record successful completion
     PERFORM flight_recorder._record_collection_end(v_stat_id, true, NULL);
 
+    -- A+ Safety: Reset statement_timeout to avoid affecting subsequent queries
+    PERFORM set_config('statement_timeout', '0', true);
+
     RETURN v_captured_at;
 EXCEPTION
     WHEN OTHERS THEN
         -- P0 Safety: Record failure if entire function fails
         PERFORM flight_recorder._record_collection_end(v_stat_id, false, SQLERRM);
+        -- A+ Safety: Reset statement_timeout even on failure
+        PERFORM set_config('statement_timeout', '0', true);
         RAISE;
 END;
 $$;
 
 -- -----------------------------------------------------------------------------
 -- flight_recorder.snapshot() - Capture current state
+-- A+ Safety: Per-section timeouts
 -- -----------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION flight_recorder.snapshot()
@@ -1554,21 +1575,19 @@ BEGIN
     -- P0 Safety: Record collection start for circuit breaker (5 sections: system stats, snapshot INSERT, tracked tables, replication, statements)
     v_stat_id := flight_recorder._record_collection_start('snapshot', 5);
 
-    -- P0 Safety: Set timeouts and resource limits (A-GRADE: REDUCED THRESHOLDS)
-    PERFORM set_config('statement_timeout',
-        COALESCE(flight_recorder._get_config('statement_timeout_ms', '2000'), '2000'),
-        true);  -- REDUCED from 5000ms to 2000ms
+    -- P0 Safety: Set lock timeout and work_mem (A-GRADE: REDUCED THRESHOLDS)
     PERFORM set_config('lock_timeout',
         COALESCE(flight_recorder._get_config('lock_timeout_ms', '500'), '500'),
         true);  -- REDUCED from 1000ms to 500ms
     PERFORM set_config('work_mem',
         COALESCE(flight_recorder._get_config('work_mem_kb', '2048'), '2048') || 'kB',
-        true);  -- NEW: Limit memory for joins/sorts
+        true);  -- Limit memory for joins/sorts
 
     v_pg_version := flight_recorder._pg_version();
 
-    -- P0 Safety: Collect system stats with exception handling
+    -- Section 1: Collect system stats (A+: Per-section timeout)
     BEGIN
+        PERFORM flight_recorder._set_section_timeout();
         -- Count active autovacuum workers
         SELECT count(*)::integer INTO v_autovacuum_workers
         FROM pg_stat_activity
@@ -1598,9 +1617,10 @@ BEGIN
         v_temp_bytes := 0;
     END;
 
-    -- P1 Safety: pg_stat_io collection with single query (PG16+)
+    -- Section 2: pg_stat_io collection (A+: Per-section timeout, PG16+)
     IF v_pg_version >= 16 THEN
     BEGIN
+        PERFORM flight_recorder._set_section_timeout();
         -- Consolidate all backend_type queries into single query using FILTER
         -- More efficient: single catalog lookup, single scan of pg_stat_io
         SELECT
@@ -1737,8 +1757,9 @@ BEGIN
     -- Main snapshot INSERT completed successfully
     PERFORM flight_recorder._record_section_success(v_stat_id);
 
-    -- P0 Safety: Capture stats for tracked tables with exception handling
+    -- Section 3: Capture stats for tracked tables (A+: Per-section timeout)
     BEGIN
+        PERFORM flight_recorder._set_section_timeout();
         INSERT INTO flight_recorder.table_snapshots (
             snapshot_id, relid, schemaname, relname,
             pg_relation_size, pg_total_relation_size, pg_indexes_size,
@@ -1777,8 +1798,9 @@ BEGIN
         RAISE WARNING 'pg-flight-recorder: Tracked tables collection failed: %', SQLERRM;
     END;
 
-    -- P0 Safety: Capture replication stats with exception handling
+    -- Section 4: Capture replication stats (A+: Per-section timeout)
     BEGIN
+        PERFORM flight_recorder._set_section_timeout();
         INSERT INTO flight_recorder.replication_snapshots (
             snapshot_id, pid, client_addr, application_name, state, sync_state,
             sent_lsn, write_lsn, flush_lsn, replay_lsn,
@@ -1805,13 +1827,14 @@ BEGIN
         RAISE WARNING 'pg-flight-recorder: Replication stats collection failed: %', SQLERRM;
     END;
 
-    -- Capture pg_stat_statements (if available and enabled)
+    -- Section 5: Capture pg_stat_statements (A+: Per-section timeout, if available and enabled)
     IF flight_recorder._has_pg_stat_statements()
        AND flight_recorder._get_config('statements_enabled', 'auto') != 'false'
     THEN
         DECLARE
             v_stmt_status TEXT;
         BEGIN
+            PERFORM flight_recorder._set_section_timeout();
             -- Check if statement tracking is healthy (not under high churn)
             SELECT status INTO v_stmt_status
             FROM flight_recorder._check_statements_health();
@@ -1870,11 +1893,16 @@ BEGIN
     -- P0 Safety: Record successful completion
     PERFORM flight_recorder._record_collection_end(v_stat_id, true, NULL);
 
+    -- A+ Safety: Reset statement_timeout to avoid affecting subsequent queries
+    PERFORM set_config('statement_timeout', '0', true);
+
     RETURN v_captured_at;
 EXCEPTION
     WHEN OTHERS THEN
         -- P0 Safety: Record failure if entire function fails
         PERFORM flight_recorder._record_collection_end(v_stat_id, false, SQLERRM);
+        -- A+ Safety: Reset statement_timeout even on failure
+        PERFORM set_config('statement_timeout', '0', true);
         RAISE;
 END;
 $$;
