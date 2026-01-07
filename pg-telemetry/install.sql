@@ -291,8 +291,9 @@
 -- SCHEDULED JOBS (pg_cron)
 -- ------------------------
 --   telemetry_snapshot  : */5 * * * *   (every 5 minutes)
---   telemetry_sample    : 30 seconds    (if pg_cron 1.4.1+) or * * * * * (every minute, fallback)
---   telemetry_cleanup   : 0 3 * * *     (daily at 3 AM - cleans samples, snapshots, statements, collection_stats)
+--   telemetry_sample    : 60 seconds    (REDUCED from 30s for observer safety - adaptive mode adjusts dynamically)
+--   telemetry_cleanup   : 0 3 * * *     (daily at 3 AM - drops old partitions and cleans snapshots)
+--   telemetry_partition : 0 2 * * *     (daily at 2 AM - creates future partitions proactively)
 --
 --   NOTE: The installer auto-detects pg_cron version. If < 1.4.1 (e.g., "1.4-1"),
 --   it falls back to minute-level sampling and logs a notice.
@@ -480,14 +481,43 @@ CREATE INDEX IF NOT EXISTS statement_snapshots_queryid_idx
     ON telemetry.statement_snapshots(queryid);
 
 -- -----------------------------------------------------------------------------
--- Table: samples - High-frequency sampling (every 30 seconds)
+-- Table: samples - High-frequency sampling (every 60 seconds, adaptive)
+-- PARTITIONED BY RANGE (captured_at) - Daily partitions for efficient cleanup
 -- -----------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS telemetry.samples (
-    id              SERIAL PRIMARY KEY,
-    captured_at     TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+    id              BIGINT GENERATED ALWAYS AS IDENTITY,
+    captured_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (id, captured_at)
+) PARTITION BY RANGE (captured_at);
 
+-- Create initial partitions (today, tomorrow, day after)
+DO $$
+DECLARE
+    v_partition_date DATE;
+    v_partition_name TEXT;
+    v_start_date TEXT;
+    v_end_date TEXT;
+BEGIN
+    FOR i IN 0..2 LOOP
+        v_partition_date := CURRENT_DATE + (i || ' days')::interval;
+        v_partition_name := 'samples_' || TO_CHAR(v_partition_date, 'YYYYMMDD');
+        v_start_date := v_partition_date::TEXT;
+        v_end_date := (v_partition_date + 1)::TEXT;
+
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_tables
+            WHERE schemaname = 'telemetry' AND tablename = v_partition_name
+        ) THEN
+            EXECUTE format(
+                'CREATE TABLE IF NOT EXISTS telemetry.%I PARTITION OF telemetry.samples FOR VALUES FROM (%L) TO (%L)',
+                v_partition_name, v_start_date, v_end_date
+            );
+        END IF;
+    END LOOP;
+END $$;
+
+-- Index on parent table (inherited by all partitions)
 CREATE INDEX IF NOT EXISTS samples_captured_at_idx ON telemetry.samples(captured_at);
 
 -- -----------------------------------------------------------------------------
@@ -600,7 +630,7 @@ CREATE TABLE IF NOT EXISTS telemetry.config (
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- Default configuration
+-- Default configuration (A-GRADE SAFETY DEFAULTS)
 INSERT INTO telemetry.config (key, value) VALUES
     ('mode', 'normal'),
     ('statements_enabled', 'auto'),
@@ -608,15 +638,24 @@ INSERT INTO telemetry.config (key, value) VALUES
     ('statements_min_calls', '1'),
     ('enable_locks', 'true'),
     ('enable_progress', 'true'),
-    ('circuit_breaker_threshold_ms', '5000'),  -- Skip collection if avg of last 3 runs exceeded this
+    -- P0: Circuit breaker - REDUCED from 5000ms to 1000ms for faster protection
+    ('circuit_breaker_threshold_ms', '1000'),  -- Skip collection if avg of last 3 runs exceeded this
     ('circuit_breaker_enabled', 'true'),
     ('circuit_breaker_window_minutes', '15'),  -- Look back window for moving average
+    -- P0: Statement and lock timeouts (applied in collection functions)
+    ('statement_timeout_ms', '2000'),          -- Max total collection time (REDUCED from 5000ms)
+    ('lock_timeout_ms', '500'),                -- Max wait for catalog locks (REDUCED from 1000ms)
+    ('work_mem_kb', '2048'),                   -- work_mem limit for telemetry queries (2MB)
+    -- P0: Cost-based skip thresholds (NEW - proactive checks before expensive queries)
+    ('skip_locks_threshold', '200'),           -- Skip lock collection if > N blocked locks
+    ('skip_activity_conn_threshold', '400'),   -- Skip activity if > N active connections
+    -- P1: Schema size monitoring
     ('schema_size_warning_mb', '5000'),        -- Warn when schema exceeds 5GB
     ('schema_size_critical_mb', '10000'),      -- Auto-disable when schema exceeds 10GB
     ('schema_size_check_enabled', 'true'),
-    -- P2: Automatic mode switching
-    ('auto_mode_enabled', 'false'),            -- Auto-adjust mode based on system load
-    ('auto_mode_connections_threshold', '80'), -- Switch to light if active connections >= this
+    -- P2: Automatic mode switching - ENABLED BY DEFAULT and triggers earlier
+    ('auto_mode_enabled', 'true'),             -- Auto-adjust mode based on system load (ENABLED!)
+    ('auto_mode_connections_threshold', '60'), -- Switch to light at 60% (REDUCED from 80%)
     ('auto_mode_trips_threshold', '3'),        -- Switch to emergency if circuit breaker tripped N times in 10min
     -- P2: Configurable retention by table type
     ('retention_samples_days', '7'),           -- Retention for samples table
@@ -1143,9 +1182,16 @@ BEGIN
     -- P0 Safety: Record collection start for circuit breaker (4 sections: wait events, activity, progress, locks)
     v_stat_id := telemetry._record_collection_start('sample', 4);
 
-    -- P0 Safety: Set timeouts to prevent hanging
-    PERFORM set_config('statement_timeout', '5000', true);  -- 5 second limit
-    PERFORM set_config('lock_timeout', '1000', true);       -- 1 second lock wait
+    -- P0 Safety: Set timeouts and resource limits (A-GRADE: REDUCED THRESHOLDS)
+    PERFORM set_config('statement_timeout',
+        COALESCE(telemetry._get_config('statement_timeout_ms', '2000'), '2000'),
+        true);  -- REDUCED from 5000ms to 2000ms
+    PERFORM set_config('lock_timeout',
+        COALESCE(telemetry._get_config('lock_timeout_ms', '500'), '500'),
+        true);  -- REDUCED from 1000ms to 500ms
+    PERFORM set_config('work_mem',
+        COALESCE(telemetry._get_config('work_mem_kb', '2048'), '2048') || 'kB',
+        true);  -- NEW: Limit memory for joins/sorts
 
     -- Get configuration
     v_enable_locks := COALESCE(
@@ -1182,28 +1228,50 @@ BEGIN
         RAISE WARNING 'pg-telemetry: Wait events collection failed: %', SQLERRM;
     END;
 
-    -- P0 Safety: Active sessions with exception handling
+    -- P0 Safety: Active sessions with exception handling and cost-based skip logic
     BEGIN
-        INSERT INTO telemetry.activity_samples (
-            sample_id, pid, usename, application_name, backend_type,
-            state, wait_event_type, wait_event, query_start, state_change, query_preview
-        )
-        SELECT
-            v_sample_id,
-            pid,
-            usename,
-            application_name,
-            backend_type,
-            state,
-            wait_event_type,
-            wait_event,
-            query_start,
-            state_change,
-            left(query, 200)
-        FROM pg_stat_activity
-        WHERE state != 'idle' AND pid != pg_backend_pid()
-        ORDER BY query_start ASC NULLS LAST
-        LIMIT 25;
+        -- A-GRADE: Cost-based skip - check active connection count before expensive scan
+        DECLARE
+            v_active_conn_count INTEGER;
+            v_skip_activity_threshold INTEGER;
+        BEGIN
+            v_skip_activity_threshold := COALESCE(
+                telemetry._get_config('skip_activity_conn_threshold', '400')::integer,
+                400
+            );
+
+            -- Quick count (uses index, minimal overhead)
+            SELECT COUNT(*) INTO v_active_conn_count
+            FROM pg_stat_activity
+            WHERE state != 'idle' AND pid != pg_backend_pid();
+
+            IF v_active_conn_count > v_skip_activity_threshold THEN
+                RAISE NOTICE 'pg-telemetry: Skipping activity collection - % active connections exceeds threshold %',
+                    v_active_conn_count, v_skip_activity_threshold;
+            ELSE
+                -- Safe to collect activity samples
+                INSERT INTO telemetry.activity_samples (
+                    sample_id, pid, usename, application_name, backend_type,
+                    state, wait_event_type, wait_event, query_start, state_change, query_preview
+                )
+                SELECT
+                    v_sample_id,
+                    pid,
+                    usename,
+                    application_name,
+                    backend_type,
+                    state,
+                    wait_event_type,
+                    wait_event,
+                    query_start,
+                    state_change,
+                    left(query, 200)
+                FROM pg_stat_activity
+                WHERE state != 'idle' AND pid != pg_backend_pid()
+                ORDER BY query_start ASC NULLS LAST
+                LIMIT 25;
+            END IF;
+        END;
 
         PERFORM telemetry._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
@@ -1335,24 +1403,45 @@ BEGIN
 
     -- P0 Safety: Lock sampling with exception handling (highest risk section)
     -- Optimized: Pre-filter locks with CTEs to reduce join set size by 10-50x
+    -- A-GRADE: Cost-based skip logic to avoid expensive lock query during lock storms
     IF v_enable_locks THEN
     BEGIN
-        INSERT INTO telemetry.lock_samples (
-            sample_id, blocked_pid, blocked_user, blocked_app, blocked_query_preview, blocked_duration,
-            blocking_pid, blocking_user, blocking_app, blocking_query_preview, lock_type, locked_relation
-        )
-        WITH blocked_locks AS (
-            SELECT bl.*
-            FROM pg_locks bl
-            WHERE NOT bl.granted  -- FILTER EARLY: only locks that are blocked
-              AND bl.pid != pg_backend_pid()  -- Don't monitor telemetry itself
-        ),
-        blocking_locks AS (
-            SELECT kl.*
-            FROM pg_locks kl
-            WHERE kl.granted  -- Only locks that are granted (potential blockers)
-        )
-        SELECT DISTINCT ON (blocked.pid, blocking.pid)
+        -- A-GRADE: Check blocked lock count before attempting expensive query
+        DECLARE
+            v_blocked_lock_count INTEGER;
+            v_skip_locks_threshold INTEGER;
+        BEGIN
+            v_skip_locks_threshold := COALESCE(
+                telemetry._get_config('skip_locks_threshold', '200')::integer,
+                200
+            );
+
+            -- Quick count of blocked locks (minimal overhead)
+            SELECT COUNT(*) INTO v_blocked_lock_count
+            FROM pg_locks
+            WHERE NOT granted AND pid != pg_backend_pid();
+
+            IF v_blocked_lock_count > v_skip_locks_threshold THEN
+                RAISE NOTICE 'pg-telemetry: Skipping lock collection - % blocked locks exceeds threshold % (potential lock storm)',
+                    v_blocked_lock_count, v_skip_locks_threshold;
+            ELSE
+                -- Safe to collect lock samples
+                INSERT INTO telemetry.lock_samples (
+                    sample_id, blocked_pid, blocked_user, blocked_app, blocked_query_preview, blocked_duration,
+                    blocking_pid, blocking_user, blocking_app, blocking_query_preview, lock_type, locked_relation
+                )
+                WITH blocked_locks AS (
+                    SELECT bl.*
+                    FROM pg_locks bl
+                    WHERE NOT bl.granted  -- FILTER EARLY: only locks that are blocked
+                      AND bl.pid != pg_backend_pid()  -- Don't monitor telemetry itself
+                ),
+                blocking_locks AS (
+                    SELECT kl.*
+                    FROM pg_locks kl
+                    WHERE kl.granted  -- Only locks that are granted (potential blockers)
+                )
+                SELECT DISTINCT ON (blocked.pid, blocking.pid)
             v_sample_id,
             blocked.pid,
             blocked.usename,
@@ -1383,6 +1472,8 @@ BEGIN
         JOIN pg_stat_activity blocking ON blocking.pid = kl.pid
         ORDER BY blocked.pid, blocking.pid
         LIMIT 100;  -- P0 Safety: Limit to top 100 blocking relationships
+            END IF;  -- Cost-based skip check
+        END;  -- Close nested DECLARE block
 
         PERFORM telemetry._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
@@ -1447,9 +1538,16 @@ BEGIN
     -- P0 Safety: Record collection start for circuit breaker (5 sections: system stats, snapshot INSERT, tracked tables, replication, statements)
     v_stat_id := telemetry._record_collection_start('snapshot', 5);
 
-    -- P0 Safety: Set timeouts to prevent hanging
-    PERFORM set_config('statement_timeout', '5000', true);  -- 5 second limit
-    PERFORM set_config('lock_timeout', '1000', true);       -- 1 second lock wait
+    -- P0 Safety: Set timeouts and resource limits (A-GRADE: REDUCED THRESHOLDS)
+    PERFORM set_config('statement_timeout',
+        COALESCE(telemetry._get_config('statement_timeout_ms', '2000'), '2000'),
+        true);  -- REDUCED from 5000ms to 2000ms
+    PERFORM set_config('lock_timeout',
+        COALESCE(telemetry._get_config('lock_timeout_ms', '500'), '500'),
+        true);  -- REDUCED from 1000ms to 500ms
+    PERFORM set_config('work_mem',
+        COALESCE(telemetry._get_config('work_mem_kb', '2048'), '2048') || 'kB',
+        true);  -- NEW: Limit memory for joins/sorts
 
     v_pg_version := telemetry._pg_version();
 
@@ -2789,13 +2887,13 @@ BEGIN
         RAISE EXCEPTION 'Invalid mode: %. Must be normal, light, or emergency.', p_mode;
     END IF;
 
-    -- Set mode-specific configuration
+    -- Set mode-specific configuration (A-GRADE: Normal mode now 60s instead of 30s)
     CASE p_mode
         WHEN 'normal' THEN
-            v_interval := '30 seconds';
+            v_interval := '60 seconds';  -- A-GRADE: INCREASED from 30s to 60s for safety
             v_enable_locks := TRUE;
             v_enable_progress := TRUE;
-            v_description := 'Normal mode: 30s sampling, all collectors enabled';
+            v_description := 'Normal mode: 60s sampling (A-GRADE safety), all collectors enabled';
         WHEN 'light' THEN
             v_interval := '* * * * *';  -- Every minute (cron format for 60s)
             v_enable_locks := TRUE;
@@ -3003,6 +3101,117 @@ END;
 $$;
 
 -- -----------------------------------------------------------------------------
+-- A-GRADE: Partition Management Functions
+-- -----------------------------------------------------------------------------
+
+-- Create future partitions for samples table (daily partitions)
+CREATE OR REPLACE FUNCTION telemetry.create_partitions(p_days_ahead INTEGER DEFAULT 3)
+RETURNS TEXT
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_partition_date DATE;
+    v_partition_name TEXT;
+    v_start_date TEXT;
+    v_end_date TEXT;
+    v_created INTEGER := 0;
+BEGIN
+    FOR i IN 0..p_days_ahead LOOP
+        v_partition_date := CURRENT_DATE + (i || ' days')::interval;
+        v_partition_name := 'samples_' || TO_CHAR(v_partition_date, 'YYYYMMDD');
+        v_start_date := v_partition_date::TEXT;
+        v_end_date := (v_partition_date + 1)::TEXT;
+
+        -- Check if partition exists
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_tables
+            WHERE schemaname = 'telemetry' AND tablename = v_partition_name
+        ) THEN
+            EXECUTE format(
+                'CREATE TABLE telemetry.%I PARTITION OF telemetry.samples FOR VALUES FROM (%L) TO (%L)',
+                v_partition_name, v_start_date, v_end_date
+            );
+            v_created := v_created + 1;
+        END IF;
+    END LOOP;
+
+    RETURN format('Created %s future partition(s) for samples table', v_created);
+END;
+$$;
+
+-- Drop old partitions (more efficient than DELETE for partitioned tables)
+CREATE OR REPLACE FUNCTION telemetry.drop_old_partitions(p_retention_days INTEGER DEFAULT NULL)
+RETURNS TEXT
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_retention_days INTEGER;
+    v_cutoff_date DATE;
+    v_partition_name TEXT;
+    v_partition_date DATE;
+    v_dropped INTEGER := 0;
+BEGIN
+    -- Get retention from config
+    v_retention_days := COALESCE(
+        p_retention_days,
+        telemetry._get_config('retention_samples_days', '7')::integer,
+        7
+    );
+
+    v_cutoff_date := CURRENT_DATE - v_retention_days;
+
+    -- Find and drop old partitions
+    FOR v_partition_name IN
+        SELECT tablename
+        FROM pg_tables
+        WHERE schemaname = 'telemetry'
+          AND tablename LIKE 'samples_%'
+          AND tablename ~ 'samples_\d{8}$'
+        ORDER BY tablename
+    LOOP
+        -- Extract date from partition name (format: samples_YYYYMMDD)
+        BEGIN
+            v_partition_date := TO_DATE(substring(v_partition_name from 9), 'YYYYMMDD');
+
+            IF v_partition_date < v_cutoff_date THEN
+                EXECUTE format('DROP TABLE IF EXISTS telemetry.%I', v_partition_name);
+                v_dropped := v_dropped + 1;
+                RAISE NOTICE 'Dropped old partition: %', v_partition_name;
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING 'Failed to process partition %: %', v_partition_name, SQLERRM;
+        END;
+    END LOOP;
+
+    RETURN format('Dropped %s old partition(s) older than % days', v_dropped, v_retention_days);
+END;
+$$;
+
+-- List all partitions with sizes
+CREATE OR REPLACE FUNCTION telemetry.list_partitions()
+RETURNS TABLE(
+    partition_name TEXT,
+    partition_date DATE,
+    size_pretty TEXT,
+    row_count BIGINT
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        t.tablename::TEXT,
+        TO_DATE(substring(t.tablename from 9), 'YYYYMMDD'),
+        pg_size_pretty(pg_total_relation_size('telemetry.' || t.tablename)),
+        (SELECT count(*) FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'telemetry' AND c.relname = t.tablename)::BIGINT
+    FROM pg_tables t
+    WHERE t.schemaname = 'telemetry'
+      AND t.tablename LIKE 'samples_%'
+      AND t.tablename ~ 'samples_\d{8}$'
+    ORDER BY t.tablename;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
 -- telemetry.disable() - Emergency kill switch: stop all collection
 -- -----------------------------------------------------------------------------
 
@@ -3024,6 +3233,11 @@ BEGIN
 
         PERFORM cron.unschedule('telemetry_cleanup')
         WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_cleanup');
+        IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
+
+        -- A-GRADE: Unschedule partition creation
+        PERFORM cron.unschedule('telemetry_partition')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_partition');
         IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
 
         -- Mark as disabled in config
@@ -3080,10 +3294,10 @@ BEGIN
         PERFORM cron.schedule('telemetry_snapshot', '*/5 * * * *', 'SELECT telemetry.snapshot()');
         v_scheduled := v_scheduled + 1;
 
-        -- Schedule sample based on mode and pg_cron capabilities
+        -- Schedule sample based on mode and pg_cron capabilities (A-GRADE: INCREASED from 30s to 60s)
         IF v_mode = 'normal' AND v_supports_subsecond THEN
-            PERFORM cron.schedule('telemetry_sample', '30 seconds', 'SELECT telemetry.sample()');
-            v_sample_schedule := '30 seconds';
+            PERFORM cron.schedule('telemetry_sample', '60 seconds', 'SELECT telemetry.sample()');
+            v_sample_schedule := '60 seconds (A-GRADE safety)';
         ELSIF v_mode = 'light' OR (v_mode = 'normal' AND NOT v_supports_subsecond) THEN
             PERFORM cron.schedule('telemetry_sample', '* * * * *', 'SELECT telemetry.sample()');
             v_sample_schedule := '* * * * * (every minute)';
@@ -3093,8 +3307,13 @@ BEGIN
         END IF;
         v_scheduled := v_scheduled + 1;
 
-        -- Schedule cleanup (daily at 3 AM)
-        PERFORM cron.schedule('telemetry_cleanup', '0 3 * * *', 'SELECT * FROM telemetry.cleanup(''7 days''::interval)');
+        -- Schedule cleanup (daily at 3 AM) - now uses drop_old_partitions for samples table
+        PERFORM cron.schedule('telemetry_cleanup', '0 3 * * *',
+            'SELECT telemetry.drop_old_partitions(); SELECT * FROM telemetry.cleanup(''7 days''::interval);');
+        v_scheduled := v_scheduled + 1;
+
+        -- A-GRADE: Schedule partition creation (daily at 2 AM) - create future partitions proactively
+        PERFORM cron.schedule('telemetry_partition', '0 2 * * *', 'SELECT telemetry.create_partitions(3)');
         v_scheduled := v_scheduled + 1;
 
         -- Mark as enabled in config
@@ -3135,6 +3354,8 @@ BEGIN
         WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_sample');
         PERFORM cron.unschedule('telemetry_cleanup')
         WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_cleanup');
+        PERFORM cron.unschedule('telemetry_partition')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry_partition');
     EXCEPTION
         WHEN undefined_table THEN NULL;
         WHEN undefined_function THEN NULL;
