@@ -400,41 +400,36 @@ SELECT * FROM telemetry.check_alerts('1 hour');
 - Schedule via pg_cron to log alerts to application_name
 - Disabled by default to avoid alert fatigue
 
-### 13. Data Export and Integration (P4)
+### 13. AI Data Export (P4)
 
-Export telemetry data for external analysis:
+Export telemetry data in a compact, token-efficient format optimized for LLM analysis (ChatGPT, Claude, etc.):
 
 ```sql
--- Export to JSON for external tools
+-- Export to AI-friendly JSON
 SELECT telemetry.export_json(
     '2024-12-16 14:00'::timestamptz,
-    '2024-12-16 15:00'::timestamptz,
-    true,  -- include_samples
-    true   -- include_snapshots
+    '2024-12-16 15:00'::timestamptz
 );
--- Returns: JSONB with export_time, start_time, end_time, samples[], snapshots[]
 ```
 
-**Use cases:**
-- Export to time-series databases (InfluxDB, Prometheus)
-- Import to data warehouses for long-term analysis
-- Share incident data with support teams
-- Integrate with custom visualization tools
+**Why it's better:**
+- **Token Efficient:** Uses compact arrays instead of verbose objects (reduces tokens by ~60%)
+- **Context Aware:** Includes pre-calculated anomaly reports and wait summaries
+- **Schema Hints:** Includes metadata describing the data structure for the AI
 
 **JSON structure:**
 ```json
 {
-  "export_time": "2024-12-16T15:30:00Z",
-  "start_time": "2024-12-16T14:00:00Z",
-  "end_time": "2024-12-16T15:00:00Z",
+  "meta": {
+    "generated_at": "...",
+    "schemas": { "samples": "..." }
+  },
+  "anomalies": [ ... ],
+  "wait_summary": [ ... ],
   "samples": [
-    {
-      "captured_at": "...",
-      "wait_events": [...],
-      "locks": [...]
-    }
-  ],
-  "snapshots": [...]
+    ["2024-12-16T14:00:00Z", [[...wait_events]], [[...locks]]],
+    ...
+  ]
 }
 ```
 

@@ -4021,12 +4021,10 @@ BEGIN
 END;
 $$;
 
--- P4: Export telemetry data to JSON format
+-- P4: Export telemetry data to JSON format (AI-Optimized)
 CREATE OR REPLACE FUNCTION telemetry.export_json(
     p_start_time TIMESTAMPTZ,
-    p_end_time TIMESTAMPTZ,
-    p_include_samples BOOLEAN DEFAULT true,
-    p_include_snapshots BOOLEAN DEFAULT true
+    p_end_time TIMESTAMPTZ
 )
 RETURNS JSONB
 LANGUAGE plpgsql AS $$
@@ -4034,63 +4032,81 @@ DECLARE
     v_result JSONB;
     v_samples JSONB;
     v_snapshots JSONB;
+    v_anomalies JSONB;
+    v_wait_summary JSONB;
 BEGIN
+    -- 1. Get Anomalies (High signal)
+    SELECT jsonb_agg(to_jsonb(r)) INTO v_anomalies
+    FROM telemetry.anomaly_report(p_start_time, p_end_time) r;
+
+    -- 2. Get Wait Summary (High signal)
+    SELECT jsonb_agg(to_jsonb(r)) INTO v_wait_summary
+    FROM telemetry.wait_summary(p_start_time, p_end_time) r;
+
+    -- 3. Get Samples (Compact format: Array of Arrays)
+    -- Schema: [captured_at, [wait_events], [locks]]
+    -- Wait Events Schema: [backend, type, event, count]
+    -- Locks Schema: [blocked_pid, blocking_pid, type, duration]
+    SELECT jsonb_agg(
+        jsonb_build_array(
+            s.captured_at,
+            COALESCE((
+                SELECT jsonb_agg(jsonb_build_array(
+                    ws.backend_type,
+                    ws.wait_event_type,
+                    ws.wait_event,
+                    ws.count
+                ))
+                FROM telemetry.wait_samples ws
+                WHERE ws.sample_id = s.id
+            ), '[]'::jsonb),
+            COALESCE((
+                SELECT jsonb_agg(jsonb_build_array(
+                    ls.blocked_pid,
+                    ls.blocking_pid,
+                    ls.lock_type,
+                    ls.blocked_duration
+                ))
+                FROM telemetry.lock_samples ls
+                WHERE ls.sample_id = s.id
+            ), '[]'::jsonb)
+        )
+    )
+    INTO v_samples
+    FROM telemetry.samples s
+    WHERE s.captured_at BETWEEN p_start_time AND p_end_time;
+
+    -- 4. Get Snapshots (Compact format)
+    -- Schema: [captured_at, wal_bytes, ckpt_timed, ckpt_req, bgw_backend_writes]
+    SELECT jsonb_agg(
+        jsonb_build_array(
+            sn.captured_at,
+            sn.wal_bytes,
+            sn.ckpt_timed,
+            sn.ckpt_requested,
+            sn.bgw_buffers_backend
+        )
+    )
+    INTO v_snapshots
+    FROM telemetry.snapshots sn
+    WHERE sn.captured_at BETWEEN p_start_time AND p_end_time;
+
+    -- Build Final Result with Schema Hints for AI
     v_result := jsonb_build_object(
-        'export_time', now(),
-        'start_time', p_start_time,
-        'end_time', p_end_time
+        'meta', jsonb_build_object(
+            'generated_at', now(),
+            'version', '1.0-ai',
+            'schemas', jsonb_build_object(
+                'samples', '[captured_at, wait_events[[backend, type, event, count]], locks[[blocked_pid, blocking_pid, type, duration]]]',
+                'snapshots', '[captured_at, wal_bytes, ckpt_timed, ckpt_req, bgw_backend_writes]'
+            )
+        ),
+        'range', jsonb_build_object('start', p_start_time, 'end', p_end_time),
+        'anomalies', COALESCE(v_anomalies, '[]'::jsonb),
+        'wait_summary', COALESCE(v_wait_summary, '[]'::jsonb),
+        'samples', COALESCE(v_samples, '[]'::jsonb),
+        'snapshots', COALESCE(v_snapshots, '[]'::jsonb)
     );
-
-    -- Export samples
-    IF p_include_samples THEN
-        SELECT jsonb_agg(
-            jsonb_build_object(
-                'captured_at', s.captured_at,
-                'wait_events', (
-                    SELECT jsonb_agg(jsonb_build_object(
-                        'backend_type', ws.backend_type,
-                        'wait_event_type', ws.wait_event_type,
-                        'wait_event', ws.wait_event,
-                        'count', ws.count
-                    ))
-                    FROM telemetry.wait_samples ws
-                    WHERE ws.sample_id = s.id
-                ),
-                'locks', (
-                    SELECT jsonb_agg(jsonb_build_object(
-                        'blocked_pid', ls.blocked_pid,
-                        'blocking_pid', ls.blocking_pid,
-                        'lock_type', ls.lock_type
-                    ))
-                    FROM telemetry.lock_samples ls
-                    WHERE ls.sample_id = s.id
-                )
-            )
-        )
-        INTO v_samples
-        FROM telemetry.samples s
-        WHERE s.captured_at BETWEEN p_start_time AND p_end_time;
-
-        v_result := v_result || jsonb_build_object('samples', COALESCE(v_samples, '[]'::jsonb));
-    END IF;
-
-    -- Export snapshots
-    IF p_include_snapshots THEN
-        SELECT jsonb_agg(
-            jsonb_build_object(
-                'captured_at', sn.captured_at,
-                'wal_bytes', sn.wal_bytes,
-                'ckpt_timed', sn.ckpt_timed,
-                'ckpt_requested', sn.ckpt_requested,
-                'bgw_buffers_backend', sn.bgw_buffers_backend
-            )
-        )
-        INTO v_snapshots
-        FROM telemetry.snapshots sn
-        WHERE sn.captured_at BETWEEN p_start_time AND p_end_time;
-
-        v_result := v_result || jsonb_build_object('snapshots', COALESCE(v_snapshots, '[]'::jsonb));
-    END IF;
 
     RETURN v_result;
 END;

@@ -684,8 +684,8 @@ SELECT lives_ok(
 
 -- Test P4: Export includes metadata
 SELECT ok(
-    (SELECT telemetry.export_json(now() - interval '1 hour', now()) ? 'export_time'),
-    'P4: export_json() should include export_time in result'
+    (SELECT telemetry.export_json(now() - interval '1 hour', now()) ? 'meta'),
+    'P4: export_json() should include meta in result'
 );
 
 -- Test P4: Config recommendations function exists
