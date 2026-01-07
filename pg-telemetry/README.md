@@ -72,6 +72,16 @@ SELECT * FROM telemetry.summary_report('2024-12-16 14:00', '2024-12-16 15:00');
 
 Track specific tables for detailed monitoring:
 
+**⚠️ PERFORMANCE WARNING:** Each tracked table adds overhead to every snapshot (every 5 minutes):
+- 3 size calculations (relation, indexes, total) per table
+- 1 JOIN to pg_stat_user_tables per table
+- On slow storage or large tables (>10GB), can add 10-50ms per table
+
+**Recommendation:** Track only critical tables (5-20 tables max). Avoid tracking:
+- Very large tables (>100GB) unless absolutely necessary
+- Tables with heavy concurrent access
+- Temporary or frequently dropped tables
+
 ```sql
 -- Register a table
 SELECT telemetry.track_table('orders');

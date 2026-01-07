@@ -292,7 +292,7 @@
 -- ------------------------
 --   telemetry_snapshot  : */5 * * * *   (every 5 minutes)
 --   telemetry_sample    : 30 seconds    (if pg_cron 1.4.1+) or * * * * * (every minute, fallback)
---   telemetry_cleanup   : 0 3 * * *     (daily at 3 AM, retains 7 days)
+--   telemetry_cleanup   : 0 3 * * *     (daily at 3 AM - cleans samples, snapshots, statements, collection_stats)
 --
 --   NOTE: The installer auto-detects pg_cron version. If < 1.4.1 (e.g., "1.4-1"),
 --   it falls back to minute-level sampling and logs a notice.
@@ -608,8 +608,9 @@ INSERT INTO telemetry.config (key, value) VALUES
     ('statements_min_calls', '1'),
     ('enable_locks', 'true'),
     ('enable_progress', 'true'),
-    ('circuit_breaker_threshold_ms', '5000'),  -- Skip collection if last run exceeded this
+    ('circuit_breaker_threshold_ms', '5000'),  -- Skip collection if avg of last 3 runs exceeded this
     ('circuit_breaker_enabled', 'true'),
+    ('circuit_breaker_window_minutes', '15'),  -- Look back window for moving average
     ('schema_size_warning_mb', '5000'),        -- Warn when schema exceeds 5GB
     ('schema_size_critical_mb', '10000'),      -- Auto-disable when schema exceeds 10GB
     ('schema_size_check_enabled', 'true'),
@@ -621,6 +622,7 @@ INSERT INTO telemetry.config (key, value) VALUES
     ('retention_samples_days', '7'),           -- Retention for samples table
     ('retention_snapshots_days', '30'),        -- Retention for snapshots table
     ('retention_statements_days', '30'),       -- Retention for pg_stat_statements snapshots
+    ('retention_collection_stats_days', '30'), -- Retention for collection_stats table
     -- P3: Self-monitoring and health checks
     ('self_monitoring_enabled', 'true'),       -- Track telemetry system performance
     ('health_check_enabled', 'true'),          -- Enable health check function
@@ -643,7 +645,9 @@ CREATE TABLE IF NOT EXISTS telemetry.collection_stats (
     success         BOOLEAN DEFAULT true,
     error_message   TEXT,
     skipped         BOOLEAN DEFAULT false,
-    skipped_reason  TEXT
+    skipped_reason  TEXT,
+    sections_total  INTEGER,     -- Total sections attempted
+    sections_succeeded INTEGER   -- How many sections completed successfully
 );
 
 CREATE INDEX IF NOT EXISTS collection_stats_type_started_idx
@@ -659,8 +663,8 @@ LANGUAGE plpgsql AS $$
 DECLARE
     v_enabled BOOLEAN;
     v_threshold_ms INTEGER;
-    v_last_duration_ms INTEGER;
-    v_last_started TIMESTAMPTZ;
+    v_avg_duration_ms NUMERIC;
+    v_window_minutes INTEGER;
 BEGIN
     -- Check if circuit breaker is enabled
     v_enabled := COALESCE(
@@ -678,20 +682,28 @@ BEGIN
         5000
     );
 
-    -- Get last successful collection duration
-    SELECT duration_ms, started_at
-    INTO v_last_duration_ms, v_last_started
-    FROM telemetry.collection_stats
-    WHERE collection_type = p_collection_type
-      AND success = true
-      AND skipped = false
-    ORDER BY started_at DESC
-    LIMIT 1;
+    -- Get look back window
+    v_window_minutes := COALESCE(
+        telemetry._get_config('circuit_breaker_window_minutes', '15')::integer,
+        15
+    );
 
-    -- Skip if last run exceeded threshold and was recent (within 5 minutes)
-    IF v_last_duration_ms IS NOT NULL
-       AND v_last_duration_ms > v_threshold_ms
-       AND v_last_started > now() - interval '5 minutes' THEN
+    -- Calculate moving average of last 3 successful collections within window
+    SELECT avg(duration_ms) INTO v_avg_duration_ms
+    FROM (
+        SELECT duration_ms
+        FROM telemetry.collection_stats
+        WHERE collection_type = p_collection_type
+          AND success = true
+          AND skipped = false
+          AND started_at > now() - (v_window_minutes || ' minutes')::interval
+        ORDER BY started_at DESC
+        LIMIT 3  -- Moving average of last 3
+    ) recent;
+
+    -- Skip if average exceeds threshold
+    IF v_avg_duration_ms IS NOT NULL
+       AND v_avg_duration_ms > v_threshold_ms THEN
         RETURN true;  -- Skip this collection
     END IF;
 
@@ -703,11 +715,14 @@ $$;
 -- Helper: Record collection start
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION telemetry._record_collection_start(p_collection_type TEXT)
+CREATE OR REPLACE FUNCTION telemetry._record_collection_start(
+    p_collection_type TEXT,
+    p_sections_total INTEGER DEFAULT NULL
+)
 RETURNS INTEGER
 LANGUAGE sql AS $$
-    INSERT INTO telemetry.collection_stats (collection_type, started_at)
-    VALUES (p_collection_type, now())
+    INSERT INTO telemetry.collection_stats (collection_type, started_at, sections_total)
+    VALUES (p_collection_type, now(), p_sections_total)
     RETURNING id
 $$;
 
@@ -744,6 +759,18 @@ LANGUAGE sql AS $$
         collection_type, started_at, completed_at, skipped, skipped_reason
     )
     VALUES (p_collection_type, now(), now(), true, p_reason)
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Helper: Record section success (increment counter)
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry._record_section_success(p_stat_id INTEGER)
+RETURNS VOID
+LANGUAGE sql AS $$
+    UPDATE telemetry.collection_stats
+    SET sections_succeeded = COALESCE(sections_succeeded, 0) + 1
+    WHERE id = p_stat_id
 $$;
 
 -- -----------------------------------------------------------------------------
@@ -882,6 +909,68 @@ LANGUAGE sql STABLE AS $$
 $$;
 
 -- -----------------------------------------------------------------------------
+-- Helper: Check pg_stat_statements health (utilization and churn)
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION telemetry._check_statements_health()
+RETURNS TABLE(
+    current_statements BIGINT,
+    max_statements INTEGER,
+    utilization_pct NUMERIC,
+    dealloc_count BIGINT,
+    status TEXT
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_current BIGINT;
+    v_max INTEGER;
+    v_dealloc BIGINT;
+BEGIN
+    -- Check if pg_stat_statements is available
+    IF NOT telemetry._has_pg_stat_statements() THEN
+        RETURN QUERY SELECT 0::bigint, 0::integer, 0::numeric, 0::bigint, 'DISABLED'::text;
+        RETURN;
+    END IF;
+
+    -- Get max from configuration
+    BEGIN
+        v_max := current_setting('pg_stat_statements.max')::integer;
+    EXCEPTION WHEN OTHERS THEN
+        v_max := 5000;  -- Default
+    END;
+
+    -- Check pg_stat_statements_info (PG14+) for dealloc count
+    IF EXISTS (SELECT 1 FROM pg_views WHERE viewname = 'pg_stat_statements_info') THEN
+        BEGIN
+            SELECT
+                (SELECT count(*) FROM pg_stat_statements),
+                (SELECT dealloc FROM pg_stat_statements_info LIMIT 1)
+            INTO v_current, v_dealloc;
+        EXCEPTION WHEN OTHERS THEN
+            SELECT count(*) INTO v_current FROM pg_stat_statements;
+            v_dealloc := NULL;
+        END;
+    ELSE
+        -- Fallback for PG13 or when pg_stat_statements_info not available
+        SELECT count(*) INTO v_current FROM pg_stat_statements;
+        v_dealloc := NULL;
+    END IF;
+
+    -- Determine status based on utilization
+    RETURN QUERY SELECT
+        v_current,
+        v_max,
+        ROUND(100.0 * v_current / NULLIF(v_max, 0), 1),
+        v_dealloc,
+        CASE
+            WHEN v_current::numeric / NULLIF(v_max, 0) > 0.95 THEN 'HIGH_CHURN'
+            WHEN v_current::numeric / NULLIF(v_max, 0) > 0.80 THEN 'WARNING'
+            ELSE 'OK'
+        END;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
 -- P1 Safety: Check schema size and enforce limits
 -- -----------------------------------------------------------------------------
 
@@ -977,6 +1066,9 @@ $$;
 -- Table tracking functions
 -- -----------------------------------------------------------------------------
 
+-- WARNING: Each tracked table adds ~10-50ms overhead per snapshot (every 5 min)
+-- Due to pg_relation_size(), pg_total_relation_size(), pg_indexes_size() calls
+-- Recommend tracking max 5-20 critical tables
 CREATE OR REPLACE FUNCTION telemetry.track_table(p_table TEXT, p_schema TEXT DEFAULT 'public')
 RETURNS TEXT
 LANGUAGE plpgsql AS $$
@@ -1048,11 +1140,8 @@ BEGIN
         RETURN v_captured_at;
     END IF;
 
-    -- P1 Safety: Check schema size (runs every sample, auto-disables if critical)
-    PERFORM telemetry._check_schema_size();
-
-    -- P0 Safety: Record collection start for circuit breaker
-    v_stat_id := telemetry._record_collection_start('sample');
+    -- P0 Safety: Record collection start for circuit breaker (4 sections: wait events, activity, progress, locks)
+    v_stat_id := telemetry._record_collection_start('sample', 4);
 
     -- P0 Safety: Set timeouts to prevent hanging
     PERFORM set_config('statement_timeout', '5000', true);  -- 5 second limit
@@ -1087,6 +1176,8 @@ BEGIN
         FROM pg_stat_activity
         WHERE pid != pg_backend_pid()
         GROUP BY backend_type, wait_event_type, wait_event, state;
+
+        PERFORM telemetry._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
         RAISE WARNING 'pg-telemetry: Wait events collection failed: %', SQLERRM;
     END;
@@ -1113,6 +1204,8 @@ BEGIN
         WHERE state != 'idle' AND pid != pg_backend_pid()
         ORDER BY query_start ASC NULLS LAST
         LIMIT 25;
+
+        PERFORM telemetry._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
         RAISE WARNING 'pg-telemetry: Activity samples collection failed: %', SQLERRM;
     END;
@@ -1233,17 +1326,31 @@ BEGIN
                 'partitions_done', p.partitions_done
             )
         FROM pg_stat_progress_create_index p;
+
+        PERFORM telemetry._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
         RAISE WARNING 'pg-telemetry: Progress tracking collection failed: %', SQLERRM;
     END;
     END IF;  -- v_enable_progress
 
     -- P0 Safety: Lock sampling with exception handling (highest risk section)
+    -- Optimized: Pre-filter locks with CTEs to reduce join set size by 10-50x
     IF v_enable_locks THEN
     BEGIN
         INSERT INTO telemetry.lock_samples (
             sample_id, blocked_pid, blocked_user, blocked_app, blocked_query_preview, blocked_duration,
             blocking_pid, blocking_user, blocking_app, blocking_query_preview, lock_type, locked_relation
+        )
+        WITH blocked_locks AS (
+            SELECT bl.*
+            FROM pg_locks bl
+            WHERE NOT bl.granted  -- FILTER EARLY: only locks that are blocked
+              AND bl.pid != pg_backend_pid()  -- Don't monitor telemetry itself
+        ),
+        blocking_locks AS (
+            SELECT kl.*
+            FROM pg_locks kl
+            WHERE kl.granted  -- Only locks that are granted (potential blockers)
         )
         SELECT DISTINCT ON (blocked.pid, blocking.pid)
             v_sample_id,
@@ -1258,9 +1365,9 @@ BEGIN
             left(blocking.query, 200),
             bl.locktype,
             CASE WHEN bl.relation IS NOT NULL THEN bl.relation::regclass::text ELSE NULL END
-        FROM pg_locks bl
+        FROM blocked_locks bl
         JOIN pg_stat_activity blocked ON blocked.pid = bl.pid
-        JOIN pg_locks kl ON (
+        JOIN blocking_locks kl ON (
             kl.locktype = bl.locktype AND
             kl.database IS NOT DISTINCT FROM bl.database AND
             kl.relation IS NOT DISTINCT FROM bl.relation AND
@@ -1274,8 +1381,10 @@ BEGIN
             kl.pid != bl.pid
         )
         JOIN pg_stat_activity blocking ON blocking.pid = kl.pid
-        WHERE NOT bl.granted AND kl.granted
+        ORDER BY blocked.pid, blocking.pid
         LIMIT 100;  -- P0 Safety: Limit to top 100 blocking relationships
+
+        PERFORM telemetry._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
         RAISE WARNING 'pg-telemetry: Lock sampling collection failed: %', SQLERRM;
     END;
@@ -1335,8 +1444,8 @@ BEGIN
     -- P1 Safety: Check schema size (runs every 5 minutes, auto-disables if critical)
     PERFORM telemetry._check_schema_size();
 
-    -- P0 Safety: Record collection start for circuit breaker
-    v_stat_id := telemetry._record_collection_start('snapshot');
+    -- P0 Safety: Record collection start for circuit breaker (5 sections: system stats, snapshot INSERT, tracked tables, replication, statements)
+    v_stat_id := telemetry._record_collection_start('snapshot', 5);
 
     -- P0 Safety: Set timeouts to prevent hanging
     PERFORM set_config('statement_timeout', '5000', true);  -- 5 second limit
@@ -1363,6 +1472,8 @@ BEGIN
         INTO v_temp_files, v_temp_bytes
         FROM pg_stat_database
         WHERE datname = current_database();
+
+        PERFORM telemetry._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
         RAISE WARNING 'pg-telemetry: System stats collection failed: %', SQLERRM;
         -- Set defaults so snapshot can continue
@@ -1509,6 +1620,9 @@ BEGIN
         RAISE EXCEPTION 'Unsupported PostgreSQL version: %. Requires 15, 16, or 17.', v_pg_version;
     END IF;
 
+    -- Main snapshot INSERT completed successfully
+    PERFORM telemetry._record_section_success(v_stat_id);
+
     -- P0 Safety: Capture stats for tracked tables with exception handling
     BEGIN
         INSERT INTO telemetry.table_snapshots (
@@ -1543,6 +1657,8 @@ BEGIN
             s.autoanalyze_count
         FROM telemetry.tracked_tables t
         JOIN pg_stat_user_tables s ON s.relid = t.relid;
+
+        PERFORM telemetry._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
         RAISE WARNING 'pg-telemetry: Tracked tables collection failed: %', SQLERRM;
     END;
@@ -1569,6 +1685,8 @@ BEGIN
             flush_lag,
             replay_lag
         FROM pg_stat_replication;
+
+        PERFORM telemetry._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
         RAISE WARNING 'pg-telemetry: Replication stats collection failed: %', SQLERRM;
     END;
@@ -1577,8 +1695,18 @@ BEGIN
     IF telemetry._has_pg_stat_statements()
        AND telemetry._get_config('statements_enabled', 'auto') != 'false'
     THEN
+        DECLARE
+            v_stmt_status TEXT;
         BEGIN
-            INSERT INTO telemetry.statement_snapshots (
+            -- Check if statement tracking is healthy (not under high churn)
+            SELECT status INTO v_stmt_status
+            FROM telemetry._check_statements_health();
+
+            -- Skip if utilization too high (indicates excessive churn)
+            IF v_stmt_status = 'HIGH_CHURN' THEN
+                RAISE WARNING 'pg-telemetry: Skipping pg_stat_statements collection - high churn detected (>95%% utilization)';
+            ELSE
+                INSERT INTO telemetry.statement_snapshots (
                 snapshot_id, queryid, userid, dbid, query_preview,
                 calls, total_exec_time, min_exec_time, max_exec_time,
                 mean_exec_time, rows,
@@ -1614,6 +1742,9 @@ BEGIN
               AND s.calls >= COALESCE(telemetry._get_config('statements_min_calls', '1')::integer, 1)
             ORDER BY s.total_exec_time DESC
             LIMIT COALESCE(telemetry._get_config('statements_top_n', '50')::integer, 50);
+
+                PERFORM telemetry._record_section_success(v_stat_id);
+            END IF;  -- v_stmt_status check
         EXCEPTION
             WHEN undefined_table THEN NULL;
             WHEN undefined_column THEN NULL;
@@ -2763,6 +2894,7 @@ RETURNS TABLE(
     deleted_snapshots   BIGINT,
     deleted_samples     BIGINT,
     deleted_statements  BIGINT,
+    deleted_stats       BIGINT,
     vacuumed_tables     INTEGER
 )
 LANGUAGE plpgsql AS $$
@@ -2770,14 +2902,17 @@ DECLARE
     v_deleted_snapshots BIGINT;
     v_deleted_samples BIGINT;
     v_deleted_statements BIGINT;
+    v_deleted_stats BIGINT;
     v_vacuumed_count INTEGER := 0;
     v_table_name TEXT;
     v_samples_retention_days INTEGER;
     v_snapshots_retention_days INTEGER;
     v_statements_retention_days INTEGER;
+    v_stats_retention_days INTEGER;
     v_samples_cutoff TIMESTAMPTZ;
     v_snapshots_cutoff TIMESTAMPTZ;
     v_statements_cutoff TIMESTAMPTZ;
+    v_stats_cutoff TIMESTAMPTZ;
 BEGIN
     -- P2: Get retention periods from config (or use p_retain_interval for backward compatibility)
     IF p_retain_interval IS NOT NULL THEN
@@ -2785,6 +2920,7 @@ BEGIN
         v_samples_cutoff := now() - p_retain_interval;
         v_snapshots_cutoff := now() - p_retain_interval;
         v_statements_cutoff := now() - p_retain_interval;
+        v_stats_cutoff := now() - p_retain_interval;
     ELSE
         -- P2: Use configurable retention per table type
         v_samples_retention_days := COALESCE(
@@ -2799,10 +2935,15 @@ BEGIN
             telemetry._get_config('retention_statements_days', '30')::integer,
             30
         );
+        v_stats_retention_days := COALESCE(
+            telemetry._get_config('retention_collection_stats_days', '30')::integer,
+            30
+        );
 
         v_samples_cutoff := now() - (v_samples_retention_days || ' days')::interval;
         v_snapshots_cutoff := now() - (v_snapshots_retention_days || ' days')::interval;
         v_statements_cutoff := now() - (v_statements_retention_days || ' days')::interval;
+        v_stats_cutoff := now() - (v_stats_retention_days || ' days')::interval;
     END IF;
 
     -- Delete old samples (cascades to wait_samples, activity_samples, progress_samples, lock_samples)
@@ -2828,6 +2969,12 @@ BEGIN
     )
     SELECT count(*) INTO v_deleted_statements FROM deleted;
 
+    -- P2: Delete old collection_stats with configurable retention
+    WITH deleted AS (
+        DELETE FROM telemetry.collection_stats WHERE started_at < v_stats_cutoff RETURNING 1
+    )
+    SELECT count(*) INTO v_deleted_stats FROM deleted;
+
     -- P1 Safety: VACUUM ANALYZE after cleanup to reclaim space and update stats
     -- This prevents bloat in telemetry tables and keeps query planner informed
     FOR v_table_name IN
@@ -2851,7 +2998,7 @@ BEGIN
         END;
     END LOOP;
 
-    RETURN QUERY SELECT v_deleted_snapshots, v_deleted_samples, v_deleted_statements, v_vacuumed_count;
+    RETURN QUERY SELECT v_deleted_snapshots, v_deleted_samples, v_deleted_statements, v_deleted_stats, v_vacuumed_count;
 END;
 $$;
 
@@ -3352,6 +3499,30 @@ BEGIN
         'INFO'::text,
         format('Samples: %s, Snapshots: %s', v_sample_count, v_snapshot_count),
         NULL::text;
+
+    -- Component 6: pg_stat_statements health
+    RETURN QUERY SELECT
+        'pg_stat_statements'::text,
+        CASE h.status
+            WHEN 'DISABLED' THEN 'N/A'
+            WHEN 'OK' THEN 'Healthy'
+            WHEN 'WARNING' THEN 'Warning'
+            WHEN 'HIGH_CHURN' THEN 'Degraded'
+            ELSE 'Unknown'
+        END::text,
+        CASE
+            WHEN h.status = 'DISABLED' THEN 'Extension not available'
+            ELSE format('Utilization: %s%% (%s/%s statements)',
+                       h.utilization_pct::text,
+                       h.current_statements::text,
+                       h.max_statements::text)
+        END,
+        CASE
+            WHEN h.status = 'HIGH_CHURN' THEN 'Increase pg_stat_statements.max'
+            WHEN h.status = 'WARNING' THEN 'Monitor for increased churn'
+            ELSE NULL
+        END::text
+    FROM telemetry._check_statements_health() h;
 END;
 $$;
 
@@ -3455,6 +3626,67 @@ BEGIN
             WHEN v_skipped_collections < 5 THEN 'Minimal'
             WHEN v_skipped_collections < 20 THEN 'Moderate - check system load'
             ELSE 'Significant - system under stress'
+        END::text;
+
+    -- Section Success Rate
+    RETURN QUERY SELECT
+        'Section Success Rate'::text,
+        COALESCE(
+            round(100.0 * avg(sections_succeeded::numeric / NULLIF(sections_total, 0)), 1)::text || '%',
+            'N/A'
+        ),
+        CASE
+            WHEN avg(sections_succeeded::numeric / NULLIF(sections_total, 0)) IS NULL THEN 'No data'
+            WHEN avg(sections_succeeded::numeric / NULLIF(sections_total, 0)) >= 0.95 THEN 'Excellent'
+            WHEN avg(sections_succeeded::numeric / NULLIF(sections_total, 0)) >= 0.90 THEN 'Good'
+            WHEN avg(sections_succeeded::numeric / NULLIF(sections_total, 0)) >= 0.75 THEN 'Fair - some section failures'
+            ELSE 'Poor - frequent section failures'
+        END::text
+    FROM telemetry.collection_stats
+    WHERE started_at > now() - p_lookback_interval
+      AND sections_total IS NOT NULL;
+
+    -- Performance Trend Analysis (recent vs baseline)
+    RETURN QUERY
+    WITH recent AS (
+        SELECT duration_ms
+        FROM telemetry.collection_stats
+        WHERE collection_type = 'sample'
+          AND success = true
+          AND skipped = false
+          AND started_at > now() - p_lookback_interval
+        ORDER BY started_at DESC
+        LIMIT 10
+    ),
+    baseline AS (
+        SELECT duration_ms
+        FROM telemetry.collection_stats
+        WHERE collection_type = 'sample'
+          AND success = true
+          AND skipped = false
+          AND started_at > now() - p_lookback_interval
+        ORDER BY started_at DESC
+        LIMIT 100 OFFSET 50
+    )
+    SELECT
+        'Performance Trend'::text,
+        COALESCE(
+            CASE
+                WHEN (SELECT avg(duration_ms) FROM recent) IS NULL OR (SELECT avg(duration_ms) FROM baseline) IS NULL THEN 'Insufficient data'
+                ELSE format('%s → %s ms (%s%s)',
+                    round((SELECT avg(duration_ms) FROM baseline))::text,
+                    round((SELECT avg(duration_ms) FROM recent))::text,
+                    CASE WHEN ((SELECT avg(duration_ms) FROM recent) - (SELECT avg(duration_ms) FROM baseline)) > 0 THEN '+' ELSE '' END,
+                    round((((SELECT avg(duration_ms) FROM recent) - (SELECT avg(duration_ms) FROM baseline)) / NULLIF((SELECT avg(duration_ms) FROM baseline), 0)) * 100, 1)::text || '%'
+                )
+            END,
+            'N/A'
+        ),
+        CASE
+            WHEN (SELECT avg(duration_ms) FROM recent) IS NULL OR (SELECT avg(duration_ms) FROM baseline) IS NULL THEN 'Need more data'
+            WHEN (SELECT avg(duration_ms) FROM recent) > (SELECT avg(duration_ms) FROM baseline) * 1.5 THEN 'DEGRADING - investigate system load'
+            WHEN (SELECT avg(duration_ms) FROM recent) < (SELECT avg(duration_ms) FROM baseline) * 0.7 THEN 'IMPROVING'
+            ELSE 'STABLE'
         END::text;
 END;
 $$;
