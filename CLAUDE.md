@@ -30,13 +30,13 @@ psql -f pg-flight-recorder/uninstall.sql  # Uninstall
 
 ```sql
 -- Recent activity views
-SELECT * FROM telemetry.recent_waits;
-SELECT * FROM telemetry.recent_locks;
-SELECT * FROM telemetry.recent_activity;
+SELECT * FROM flight_recorder.recent_waits;
+SELECT * FROM flight_recorder.recent_locks;
+SELECT * FROM flight_recorder.recent_activity;
 
 -- Time window analysis
-SELECT * FROM telemetry.compare('2024-12-16 14:00', '2024-12-16 15:00');
-SELECT * FROM telemetry.wait_summary('2024-12-16 14:00', '2024-12-16 15:00');
+SELECT * FROM flight_recorder.compare('2024-12-16 14:00', '2024-12-16 15:00');
+SELECT * FROM flight_recorder.wait_summary('2024-12-16 14:00', '2024-12-16 15:00');
 ```
 
 **Requirements:** PostgreSQL 15+, pg_cron extension (1.4.1+ recommended)
